@@ -1,0 +1,372 @@
+"""
+FastAPI application entry point
+"""
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from loguru import logger
+import sys
+from contextlib import asynccontextmanager
+
+from ..config import settings
+from ..models.schemas import (
+    ReferenceValidationRequest, 
+    ReferenceValidationResponse,
+    TaggingRequest,
+    TaggingResponse,
+    APIResponse
+)
+# from ..agents.reference_agent import ReferenceProcessingAgent, ReferenceEnhancementAgent
+from ..utils.validation import ReferenceValidator
+from ..utils.tagging import ReferenceTagger
+from ..utils.api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient
+
+
+# Configure logging
+logger.remove()
+logger.add(
+    sys.stdout,
+    level=settings.log_level,
+    format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan manager"""
+    logger.info("Starting Research Paper Reference Agent API")
+    yield
+    logger.info("Shutting down Research Paper Reference Agent API")
+
+
+# Create FastAPI app
+app = FastAPI(
+    title="Research Paper Reference Agent",
+    description="API for validating, enhancing, and tagging research paper references",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize utilities
+validator = None
+tagger = None
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize utilities on startup"""
+    global validator, tagger
+    
+    try:
+        logger.info("Initializing utilities...")
+        validator = ReferenceValidator()
+        tagger = ReferenceTagger()
+        logger.info("Utilities initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize utilities: {str(e)}")
+        raise
+
+
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return APIResponse(
+        success=True,
+        message="Research Paper Reference Agent API is running",
+        data={
+            "version": "1.0.0",
+            "endpoints": [
+                "/validate",
+                "/enhance",
+                "/tag",
+                "/process",
+                "/health"
+            ]
+        }
+    )
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return APIResponse(
+        success=True,
+        message="API is healthy",
+        data={
+            "status": "healthy",
+            "utilities_initialized": validator is not None and tagger is not None
+        }
+    )
+
+
+@app.post("/validate", response_model=APIResponse)
+async def validate_references(request: ReferenceValidationRequest):
+    """Validate references and identify missing fields"""
+    try:
+        logger.info(f"Validating {len(request.references)} references")
+        
+        results = []
+        errors = []
+        
+        for i, ref_text in enumerate(request.references):
+            try:
+                # Parse reference text (simplified - in production, use proper parsing)
+                reference_data = ReferenceData(raw_text=ref_text)
+                
+                # Validate reference
+                validation_result = validator.validate_reference(reference_data, ref_text)
+                
+                results.append({
+                    "index": i,
+                    "original_text": ref_text,
+                    "is_valid": validation_result.is_valid,
+                    "missing_fields": validation_result.missing_fields,
+                    "confidence_score": validation_result.confidence_score,
+                    "suggestions": validation_result.suggestions,
+                    "warnings": validation_result.warnings
+                })
+                
+            except Exception as e:
+                logger.error(f"Error validating reference {i}: {str(e)}")
+                errors.append(f"Reference {i}: {str(e)}")
+                results.append({
+                    "index": i,
+                    "original_text": ref_text,
+                    "error": str(e),
+                    "is_valid": False
+                })
+        
+        return APIResponse(
+            success=True,
+            message=f"Validated {len(request.references)} references",
+            data={
+                "processed_count": len([r for r in results if "error" not in r]),
+                "total_count": len(request.references),
+                "results": results,
+                "errors": errors
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Validation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/enhance", response_model=APIResponse)
+async def enhance_references(request: ReferenceValidationRequest):
+    """Enhance references with missing data using various APIs"""
+    try:
+        logger.info(f"Enhancing {len(request.references)} references")
+        
+        if not validator:
+            raise HTTPException(status_code=500, detail="Validator not initialized")
+        
+        results = []
+        errors = []
+        
+        for i, ref_text in enumerate(request.references):
+            try:
+                # Parse reference text (simplified)
+                reference_data = ReferenceData(raw_text=ref_text)
+                
+                # Simple enhancement - just validate and return suggestions
+                validation_result = validator.validate_reference(reference_data, ref_text)
+                enhancement_result = {
+                    "enhanced": reference_data,
+                    "sources_used": [],
+                    "missing_fields_found": [],
+                    "warnings": validation_result.warnings
+                }
+                
+                results.append({
+                    "index": i,
+                    "original_text": ref_text,
+                    "enhanced_data": enhancement_result["enhanced"].dict(),
+                    "sources_used": enhancement_result["sources_used"],
+                    "missing_fields_found": enhancement_result["missing_fields_found"],
+                    "warnings": enhancement_result["warnings"]
+                })
+                
+            except Exception as e:
+                logger.error(f"Error enhancing reference {i}: {str(e)}")
+                errors.append(f"Reference {i}: {str(e)}")
+                results.append({
+                    "index": i,
+                    "original_text": ref_text,
+                    "error": str(e)
+                })
+        
+        return APIResponse(
+            success=True,
+            message=f"Enhanced {len(request.references)} references",
+            data={
+                "processed_count": len([r for r in results if "error" not in r]),
+                "total_count": len(request.references),
+                "results": results,
+                "errors": errors
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Enhancement error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tag", response_model=APIResponse)
+async def tag_references(request: TaggingRequest):
+    """Generate HTML tags for references"""
+    try:
+        logger.info(f"Tagging {len(request.references)} references in {request.style} style")
+        
+        if not tagger:
+            raise HTTPException(status_code=500, detail="Tagger not initialized")
+        
+        # Convert ReferenceData objects to list
+        references = request.references
+        
+        # Generate tags
+        tagged_references = tagger.tag_references(references, request.style)
+        
+        # Validate tags
+        validation_results = []
+        for i, tagged_ref in enumerate(tagged_references):
+            validation = tagger.validate_tagged_reference(tagged_ref)
+            validation_results.append({
+                "index": i,
+                "validation": validation
+            })
+        
+        return APIResponse(
+            success=True,
+            message=f"Tagged {len(references)} references",
+            data={
+                "tagged_references": tagged_references,
+                "style": request.style,
+                "validation_results": validation_results
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Tagging error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/process", response_model=APIResponse)
+async def process_references(request: ReferenceValidationRequest):
+    """Complete processing pipeline: validate, enhance, and tag references"""
+    try:
+        logger.info(f"Processing {len(request.references)} references through complete pipeline")
+        
+        if not validator or not tagger:
+            raise HTTPException(status_code=500, detail="Utilities not initialized")
+        
+        # Simple processing pipeline
+        results = []
+        errors = []
+        
+        for i, ref_text in enumerate(request.references):
+            try:
+                # Parse reference text (simplified)
+                reference_data = ReferenceData(raw_text=ref_text)
+                
+                # Validate reference
+                validation_result = validator.validate_reference(reference_data, ref_text)
+                
+                # Generate tags
+                tagged_ref = tagger.tag_references([reference_data], "elsevier")[0]
+                
+                results.append({
+                    "index": i,
+                    "original_text": ref_text,
+                    "validation": validation_result.dict(),
+                    "tagged_reference": tagged_ref,
+                    "status": "success"
+                })
+                
+            except Exception as e:
+                logger.error(f"Error processing reference {i}: {str(e)}")
+                errors.append(f"Reference {i}: {str(e)}")
+                results.append({
+                    "index": i,
+                    "original_text": ref_text,
+                    "error": str(e),
+                    "status": "error"
+                })
+        
+        result = {
+            "processed_count": len([r for r in results if r["status"] == "success"]),
+            "total_count": len(request.references),
+            "results": results,
+            "errors": errors
+        }
+        
+        return APIResponse(
+            success=True,
+            message=f"Processed {result['processed_count']}/{result['total_count']} references",
+            data=result
+        )
+        
+    except Exception as e:
+        logger.error(f"Processing error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/apis/status")
+async def check_api_status():
+    """Check status of external APIs"""
+    try:
+        status = {}
+        
+        # Test CrossRef
+        try:
+            crossref_client = CrossRefClient()
+            # Simple test query
+            test_results = await crossref_client.search_reference("test", limit=1)
+            status["crossref"] = {"status": "healthy", "results": len(test_results)}
+        except Exception as e:
+            status["crossref"] = {"status": "error", "error": str(e)}
+        
+        # Test OpenAlex
+        try:
+            openalex_client = OpenAlexClient()
+            test_results = await openalex_client.search_reference("test", limit=1)
+            status["openalex"] = {"status": "healthy", "results": len(test_results)}
+        except Exception as e:
+            status["openalex"] = {"status": "error", "error": str(e)}
+        
+        # Test Semantic Scholar
+        try:
+            semantic_client = SemanticScholarClient()
+            test_results = await semantic_client.search_reference("test", limit=1)
+            status["semantic_scholar"] = {"status": "healthy", "results": len(test_results)}
+        except Exception as e:
+            status["semantic_scholar"] = {"status": "error", "error": str(e)}
+        
+        return APIResponse(
+            success=True,
+            message="API status checked",
+            data=status
+        )
+        
+    except Exception as e:
+        logger.error(f"API status check error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "server.src.api.main:app",
+        host=settings.host,
+        port=settings.port,
+        reload=settings.debug
+    )

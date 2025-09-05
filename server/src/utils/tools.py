@@ -7,8 +7,9 @@ from pydantic import BaseModel, Field
 from loguru import logger
 
 from ..models.schemas import ReferenceData, ValidationResult
-from ..utils.api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, GROBIDClient
+from ..utils.api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient, GROBIDClient
 from ..utils.validation import ReferenceValidator
+from ..utils.enhanced_validation import EnhancedReferenceValidator
 from ..utils.tagging import ReferenceTagger
 from ..utils.db_utils import DatabaseManager
 
@@ -106,6 +107,74 @@ class ReferenceValidationTool(BaseTool):
         except Exception as e:
             logger.error(f"Reference validation error: {str(e)}")
             return f"Error validating reference: {str(e)}"
+
+
+class EnhancedReferenceValidationInput(BaseModel):
+    """Input for enhanced reference validation tool"""
+    reference_data: Dict[str, Any] = Field(description="Reference data to validate")
+    original_text: str = Field(default="", description="Original reference text")
+    enable_cross_checking: bool = Field(default=True, description="Enable cross-checking across APIs")
+
+
+class EnhancedReferenceValidationTool(BaseTool):
+    """Tool for enhanced reference validation with cross-checking and hallucination detection"""
+    name = "validate_reference_enhanced"
+    description = "Enhanced validation with cross-checking across multiple APIs and hallucination detection"
+    args_schema = EnhancedReferenceValidationInput
+    
+    def __init__(self):
+        super().__init__()
+        self.enhanced_validator = EnhancedReferenceValidator()
+    
+    def _run(self, reference_data: Dict[str, Any], original_text: str = "", enable_cross_checking: bool = True) -> str:
+        """Run the tool synchronously"""
+        import asyncio
+        return asyncio.run(self._arun(reference_data, original_text, enable_cross_checking))
+    
+    async def _arun(self, reference_data: Dict[str, Any], original_text: str = "", enable_cross_checking: bool = True) -> str:
+        """Run the tool asynchronously"""
+        try:
+            # Convert dict to ReferenceData object
+            reference = ReferenceData(**reference_data)
+            
+            # Enhanced validation
+            validation_result = await self.enhanced_validator.validate_reference_enhanced(
+                reference, original_text, enable_cross_checking
+            )
+            
+            # Format result
+            result = {
+                "is_valid": validation_result.is_valid,
+                "missing_fields": validation_result.missing_fields,
+                "confidence_score": validation_result.confidence_score,
+                "warnings": validation_result.warnings,
+                "hallucination_detected": validation_result.hallucination_detected,
+                "hallucination_details": validation_result.hallucination_details,
+                "api_coverage": validation_result.api_coverage
+            }
+            
+            if validation_result.suggestions:
+                result["suggestions"] = validation_result.suggestions
+            
+            # Format cross-check results
+            if validation_result.cross_check_results:
+                cross_check_summary = {}
+                for field, cross_check in validation_result.cross_check_results.items():
+                    cross_check_summary[field] = {
+                        "consensus_value": cross_check.consensus_value,
+                        "consensus_confidence": cross_check.consensus_confidence,
+                        "is_hallucinated": cross_check.is_hallucinated,
+                        "hallucination_reason": cross_check.hallucination_reason,
+                        "found_in_apis": list(cross_check.found_values.keys()),
+                        "missing_from_apis": cross_check.missing_from_apis
+                    }
+                result["cross_check_results"] = cross_check_summary
+            
+            return f"Enhanced validation result: {result}"
+            
+        except Exception as e:
+            logger.error(f"Enhanced reference validation error: {str(e)}")
+            return f"Error in enhanced validation: {str(e)}"
 
 
 class ReferenceTaggingInput(BaseModel):
@@ -335,6 +404,7 @@ def get_all_tools() -> List[BaseTool]:
     return [
         ReferenceSearchTool(),
         ReferenceValidationTool(),
+        EnhancedReferenceValidationTool(),
         ReferenceTaggingTool(),
         ReferenceEnhancementTool(),
         DatabaseLoggingTool()

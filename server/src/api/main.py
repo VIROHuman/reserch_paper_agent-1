@@ -14,12 +14,15 @@ from ..models.schemas import (
     ReferenceValidationResponse,
     TaggingRequest,
     TaggingResponse,
-    APIResponse
+    APIResponse,
+    ReferenceData
 )
 # from ..agents.reference_agent import ReferenceProcessingAgent, ReferenceEnhancementAgent
 from ..utils.validation import ReferenceValidator
+from ..utils.enhanced_validation import EnhancedReferenceValidator
+from ..utils.reference_parser import ReferenceParser
 from ..utils.tagging import ReferenceTagger
-from ..utils.api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient
+from ..utils.api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient
 
 
 # Configure logging
@@ -34,8 +37,24 @@ logger.add(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
+    global validator, enhanced_validator, parser, tagger
+    
     logger.info("Starting Research Paper Reference Agent API")
+    
+    # Initialize utilities
+    try:
+        logger.info("Initializing utilities...")
+        validator = ReferenceValidator()
+        enhanced_validator = EnhancedReferenceValidator()
+        parser = ReferenceParser()
+        tagger = ReferenceTagger()
+        logger.info("Utilities initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize utilities: {str(e)}")
+        raise
+    
     yield
+    
     logger.info("Shutting down Research Paper Reference Agent API")
 
 
@@ -58,22 +77,11 @@ app.add_middleware(
 
 # Initialize utilities
 validator = None
+enhanced_validator = None
+parser = None
 tagger = None
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize utilities on startup"""
-    global validator, tagger
-    
-    try:
-        logger.info("Initializing utilities...")
-        validator = ReferenceValidator()
-        tagger = ReferenceTagger()
-        logger.info("Utilities initialized successfully")
-    except Exception as e:
-        logger.error(f"Failed to initialize utilities: {str(e)}")
-        raise
 
 
 @app.get("/")
@@ -86,10 +94,12 @@ async def root():
             "version": "1.0.0",
             "endpoints": [
                 "/validate",
+                "/validate-enhanced",
                 "/enhance",
                 "/tag",
                 "/process",
-                "/health"
+                "/health",
+                "/apis/status"
             ]
         }
     )
@@ -103,27 +113,52 @@ async def health_check():
         message="API is healthy",
         data={
             "status": "healthy",
-            "utilities_initialized": validator is not None and tagger is not None
+            "utilities_initialized": validator is not None and enhanced_validator is not None and parser is not None and tagger is not None,
+            "available_validators": {
+                "basic": validator is not None,
+                "enhanced": enhanced_validator is not None,
+                "parser": parser is not None,
+                "tagger": tagger is not None
+            }
         }
     )
 
-
-@app.post("/validate", response_model=APIResponse)
-async def validate_references(request: ReferenceValidationRequest):
-    """Validate references and identify missing fields"""
+@app.post("/validate-enhanced", response_model=APIResponse)
+async def validate_references_enhanced(request: ReferenceValidationRequest):
+    """Enhanced validation with cross-checking and hallucination detection"""
     try:
-        logger.info(f"Validating {len(request.references)} references")
+        logger.info(f"Enhanced validation of {len(request.references)} references")
+        
+        if not enhanced_validator:
+            raise HTTPException(status_code=500, detail="Enhanced validator not initialized")
         
         results = []
         errors = []
         
         for i, ref_text in enumerate(request.references):
             try:
-                # Parse reference text (simplified - in production, use proper parsing)
-                reference_data = ReferenceData(raw_text=ref_text)
+                # Parse reference text using the reference parser
+                if not parser:
+                    raise HTTPException(status_code=500, detail="Parser not initialized")
                 
-                # Validate reference
-                validation_result = validator.validate_reference(reference_data, ref_text)
+                reference_data = parser.parse_reference(ref_text)
+                
+                # Enhanced validation with cross-checking
+                validation_result = await enhanced_validator.validate_reference_enhanced(
+                    reference_data, ref_text, enable_cross_checking=True
+                )
+                
+                # Format cross-check results
+                cross_check_summary = {}
+                for field, result in validation_result.cross_check_results.items():
+                    cross_check_summary[field] = {
+                        "consensus_value": result.consensus_value,
+                        "consensus_confidence": result.consensus_confidence,
+                        "is_hallucinated": result.is_hallucinated,
+                        "hallucination_reason": result.hallucination_reason,
+                        "found_in_apis": list(result.found_values.keys()),
+                        "missing_from_apis": result.missing_from_apis
+                    }
                 
                 results.append({
                     "index": i,
@@ -132,11 +167,15 @@ async def validate_references(request: ReferenceValidationRequest):
                     "missing_fields": validation_result.missing_fields,
                     "confidence_score": validation_result.confidence_score,
                     "suggestions": validation_result.suggestions,
-                    "warnings": validation_result.warnings
+                    "warnings": validation_result.warnings,
+                    "cross_check_results": cross_check_summary,
+                    "hallucination_detected": validation_result.hallucination_detected,
+                    "hallucination_details": validation_result.hallucination_details,
+                    "api_coverage": validation_result.api_coverage
                 })
                 
             except Exception as e:
-                logger.error(f"Error validating reference {i}: {str(e)}")
+                logger.error(f"Error in enhanced validation of reference {i}: {str(e)}")
                 errors.append(f"Reference {i}: {str(e)}")
                 results.append({
                     "index": i,
@@ -147,7 +186,7 @@ async def validate_references(request: ReferenceValidationRequest):
         
         return APIResponse(
             success=True,
-            message=f"Validated {len(request.references)} references",
+            message=f"Enhanced validation completed for {len(request.references)} references",
             data={
                 "processed_count": len([r for r in results if "error" not in r]),
                 "total_count": len(request.references),
@@ -157,7 +196,7 @@ async def validate_references(request: ReferenceValidationRequest):
         )
         
     except Exception as e:
-        logger.error(f"Validation error: {str(e)}")
+        logger.error(f"Enhanced validation error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -266,28 +305,52 @@ async def process_references(request: ReferenceValidationRequest):
     try:
         logger.info(f"Processing {len(request.references)} references through complete pipeline")
         
-        if not validator or not tagger:
+        if not enhanced_validator or not parser or not tagger:
             raise HTTPException(status_code=500, detail="Utilities not initialized")
         
-        # Simple processing pipeline
+        # Enhanced processing pipeline
         results = []
         errors = []
         
         for i, ref_text in enumerate(request.references):
             try:
-                # Parse reference text (simplified)
-                reference_data = ReferenceData(raw_text=ref_text)
+                # Parse reference text using the reference parser
+                reference_data = parser.parse_reference(ref_text)
                 
-                # Validate reference
-                validation_result = validator.validate_reference(reference_data, ref_text)
+                # Enhanced validation with cross-checking
+                validation_result = await enhanced_validator.validate_reference_enhanced(
+                    reference_data, ref_text, enable_cross_checking=True
+                )
                 
                 # Generate tags
                 tagged_ref = tagger.tag_references([reference_data], "elsevier")[0]
                 
+                # Format cross-check results
+                cross_check_summary = {}
+                for field, result in validation_result.cross_check_results.items():
+                    cross_check_summary[field] = {
+                        "consensus_value": result.consensus_value,
+                        "consensus_confidence": result.consensus_confidence,
+                        "is_hallucinated": result.is_hallucinated,
+                        "hallucination_reason": result.hallucination_reason,
+                        "found_in_apis": list(result.found_values.keys()),
+                        "missing_from_apis": result.missing_from_apis
+                    }
+                
                 results.append({
                     "index": i,
                     "original_text": ref_text,
-                    "validation": validation_result.dict(),
+                    "validation": {
+                        "is_valid": validation_result.is_valid,
+                        "missing_fields": validation_result.missing_fields,
+                        "confidence_score": validation_result.confidence_score,
+                        "suggestions": validation_result.suggestions,
+                        "warnings": validation_result.warnings,
+                        "cross_check_results": cross_check_summary,
+                        "hallucination_detected": validation_result.hallucination_detected,
+                        "hallucination_details": validation_result.hallucination_details,
+                        "api_coverage": validation_result.api_coverage
+                    },
                     "tagged_reference": tagged_ref,
                     "status": "success"
                 })
@@ -350,6 +413,14 @@ async def check_api_status():
             status["semantic_scholar"] = {"status": "healthy", "results": len(test_results)}
         except Exception as e:
             status["semantic_scholar"] = {"status": "error", "error": str(e)}
+        
+        # Test DOAJ
+        try:
+            doaj_client = DOAJClient()
+            test_results = await doaj_client.search_reference("test", limit=1)
+            status["doaj"] = {"status": "healthy", "results": len(test_results)}
+        except Exception as e:
+            status["doaj"] = {"status": "error", "error": str(e)}
         
         return APIResponse(
             success=True,

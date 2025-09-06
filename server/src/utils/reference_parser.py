@@ -1,5 +1,5 @@
 """
-Hybrid reference parser using NLP + regex for maximum accuracy
+Hybrid reference parser using format-specific + NLP + regex for maximum accuracy
 """
 import re
 from typing import List, Optional, Dict, Any
@@ -7,13 +7,17 @@ from loguru import logger
 
 from ..models.schemas import ReferenceData, Author
 from ..utils.nlp_parser import NLPReferenceParser
+from ..utils.reference_format_detector import FormatSpecificParser
 
 
 class ReferenceParser:
-    """Hybrid parser for reference text using NLP + regex"""
+    """Hybrid parser for reference text using format-specific + NLP + regex"""
     
     def __init__(self):
-        # Initialize NLP parser
+        # Initialize format-specific parser
+        self.format_parser = FormatSpecificParser()
+        
+        # Initialize NLP parser as fallback
         self.nlp_parser = NLPReferenceParser()
         
         # Common patterns for different reference formats (fallback)
@@ -27,10 +31,23 @@ class ReferenceParser:
         }
     
     def parse_reference(self, reference_text: str) -> ReferenceData:
-        """Parse a reference text string using hybrid NLP + regex approach"""
+        """Parse a reference text string using format-specific + NLP + regex approach"""
         logger.info(f"🔍 HYBRID PARSING REFERENCE: {reference_text}")
         
-        # Use NLP parser as primary method
+        # Strategy 1: Try format-specific parsing first
+        try:
+            reference = self.format_parser.parse_reference(reference_text)
+            
+            # Check if we got meaningful results
+            if self._is_meaningful_result(reference):
+                logger.info("✅ Format-specific parsing completed successfully")
+                return reference
+            else:
+                logger.warning("⚠️ Format-specific parsing produced poor results, trying NLP...")
+        except Exception as e:
+            logger.error(f"❌ Format-specific parsing failed: {e}")
+        
+        # Strategy 2: Fallback to NLP parsing
         try:
             reference = self.nlp_parser.parse_reference(reference_text)
             logger.info("✅ NLP parsing completed successfully")
@@ -39,8 +56,27 @@ class ReferenceParser:
             logger.error(f"❌ NLP parsing failed: {e}")
             logger.info("🔄 Falling back to regex-only parsing...")
             
-            # Fallback to regex-only parsing
+            # Strategy 3: Fallback to regex-only parsing
             return self._parse_with_regex_only(reference_text)
+    
+    def _is_meaningful_result(self, reference: ReferenceData) -> bool:
+        """Check if the parsing result is meaningful (not just empty fields)"""
+        meaningful_fields = 0
+        
+        if reference.title and len(reference.title.strip()) > 5:
+            meaningful_fields += 1
+        
+        if reference.authors and len(reference.authors) > 0:
+            meaningful_fields += 1
+        
+        if reference.journal and len(reference.journal.strip()) > 2:
+            meaningful_fields += 1
+        
+        if reference.year and 1900 <= reference.year <= 2024:
+            meaningful_fields += 1
+        
+        # Consider it meaningful if we have at least 2 important fields
+        return meaningful_fields >= 2
     
     def _parse_with_regex_only(self, reference_text: str) -> ReferenceData:
         """Fallback regex-only parsing method"""

@@ -122,7 +122,7 @@ class NLPReferenceParser:
         self._extract_publication_details_nlp(reference, doc, text)
     
     def _extract_title_nlp(self, reference: ReferenceData, doc, text: str):
-        """Extract title using NLP analysis"""
+        """Extract title using NLP analysis with improved academic reference support"""
         logger.info("📝 Extracting title with NLP...")
         
         # Strategy 1: Look for quoted text
@@ -133,7 +133,28 @@ class NLPReferenceParser:
             reference.title = title
             return
         
-        # Strategy 2: Use sentence analysis
+        # Strategy 2: Pattern-based extraction for academic references
+        # Pattern: [1] Authors. Title. Journal
+        pattern1 = r'\[\d+\]\s+[^.]+\.\s+([^.]+)\.'
+        match1 = re.search(pattern1, text)
+        if match1:
+            title = match1.group(1).strip()
+            if len(title.split()) >= 3:  # Reasonable title length
+                reference.title = title
+                logger.info(f"✅ Found title via academic pattern: {reference.title}")
+                return
+        
+        # Pattern: Authors. Title. Journal (without brackets)
+        pattern2 = r'^[^.]+\.\s+([^.]+)\.'
+        match2 = re.search(pattern2, text)
+        if match2:
+            title = match2.group(1).strip()
+            if len(title.split()) >= 3:  # Reasonable title length
+                reference.title = title
+                logger.info(f"✅ Found title via academic pattern (no brackets): {reference.title}")
+                return
+        
+        # Strategy 3: Use sentence analysis
         sentences = sent_tokenize(text)
         if len(sentences) >= 2:
             # The title is usually the longest sentence that's not the last one
@@ -146,7 +167,7 @@ class NLPReferenceParser:
                     logger.info(f"✅ Found title via sentence analysis: {reference.title}")
                     return
         
-        # Strategy 3: Use spaCy entities and POS tagging
+        # Strategy 4: Use spaCy entities and POS tagging
         # Look for noun phrases that could be titles
         title_candidates = []
         for chunk in doc.noun_chunks:
@@ -164,12 +185,20 @@ class NLPReferenceParser:
         logger.warning("❌ No title found with NLP")
     
     def _extract_authors_nlp(self, reference: ReferenceData, doc, text: str):
-        """Extract authors using NLP NER"""
+        """Extract authors using NLP NER with improved fallback logic"""
         logger.info("👥 Extracting authors with NLP...")
         
         authors = []
         
-        # Strategy 1: Use spaCy NER to find PERSON entities
+        # Strategy 1: Pattern-based extraction first (most reliable for academic references)
+        pattern_authors = self._extract_authors_pattern_based(text)
+        if pattern_authors:
+            authors = pattern_authors
+            logger.info(f"✅ Found {len(authors)} authors via pattern matching")
+            reference.authors = authors
+            return
+        
+        # Strategy 2: Use spaCy NER to find PERSON entities
         for ent in doc.ents:
             if ent.label_ == "PERSON":
                 # Parse the person entity
@@ -178,7 +207,7 @@ class NLPReferenceParser:
                     authors.append(author)
                     logger.info(f"✅ Found author via NER: {author.first_name} {author.surname}")
         
-        # Strategy 2: Use NLTK NER as backup
+        # Strategy 3: Use NLTK NER as backup
         if not authors:
             nltk_tokens = word_tokenize(text)
             nltk_pos = pos_tag(nltk_tokens)
@@ -192,9 +221,9 @@ class NLPReferenceParser:
                         authors.append(author)
                         logger.info(f"✅ Found author via NLTK NER: {author.first_name} {author.surname}")
         
-        # Strategy 3: Pattern-based extraction as fallback
+        # Strategy 4: Enhanced pattern-based extraction as final fallback
         if not authors:
-            authors = self._extract_authors_pattern_based(text)
+            authors = self._extract_authors_enhanced_patterns(text)
         
         if authors:
             reference.authors = authors
@@ -230,41 +259,200 @@ class NLPReferenceParser:
             return None
     
     def _extract_authors_pattern_based(self, text: str) -> List[Author]:
-        """Fallback pattern-based author extraction"""
+        """Enhanced pattern-based author extraction with better academic reference support"""
         authors = []
         
-        # Pattern 1: Last, First. (Year)
-        pattern1 = r'([A-Z][a-z]+),\s*([A-Z][a-z.]+)\s*\((\d{4})\)'
-        matches1 = re.findall(pattern1, text)
-        
-        for last, first, year in matches1:
-            first_clean = first.rstrip('.')
-            authors.append(Author(
-                fnm=first_clean,
-                surname=last,
-                full_name=f"{first_clean} {last}"
-            ))
-        
-        # Pattern 2: Last, First. (without year)
-        if not authors:
-            pattern2 = r'([A-Z][a-z]+),\s*([A-Z]\.)'
-            matches2 = re.findall(pattern2, text)
+        # Pattern 1: [1] Author1, Author2, Author3. format
+        pattern1 = r'\[\d+\]\s+([^.]+)\.'
+        match1 = re.search(pattern1, text)
+        if match1:
+            authors_text = match1.group(1).strip()
+            logger.info(f"🔍 Found authors text: {authors_text}")
             
-            for last, first in matches2:
+            # Split by comma and parse each author
+            author_parts = [part.strip() for part in authors_text.split(',')]
+            for part in author_parts:
+                if part:
+                    author = self._parse_author_part(part)
+                    if author:
+                        authors.append(author)
+                        logger.info(f"✅ Parsed author: {author.first_name} {author.surname}")
+        
+        # Pattern 2: Author1, Author2, Author3. (without brackets)
+        if not authors:
+            pattern2 = r'^([^.]+)\.'
+            match2 = re.search(pattern2, text)
+            if match2:
+                authors_text = match2.group(1).strip()
+                logger.info(f"🔍 Found authors text (no brackets): {authors_text}")
+                
+                # Split by comma and parse each author
+                author_parts = [part.strip() for part in authors_text.split(',')]
+                for part in author_parts:
+                    if part:
+                        author = self._parse_author_part(part)
+                        if author:
+                            authors.append(author)
+                            logger.info(f"✅ Parsed author: {author.first_name} {author.surname}")
+        
+        # Pattern 3: Last, First. (Year) format
+        if not authors:
+            pattern3 = r'([A-Z][a-z]+),\s*([A-Z][a-z.]+)\s*\((\d{4})\)'
+            matches3 = re.findall(pattern3, text)
+            
+            for last, first, year in matches3:
                 first_clean = first.rstrip('.')
                 authors.append(Author(
                     fnm=first_clean,
                     surname=last,
                     full_name=f"{first_clean} {last}"
                 ))
+                logger.info(f"✅ Added author: {first_clean} {last}")
+        
+        # Pattern 4: First Last format (multiple authors)
+        if not authors:
+            pattern4 = r'([A-Z][a-z.]+)\s+([A-Z][a-z]+)'
+            matches4 = re.findall(pattern4, text)
+            
+            for first, last in matches4[:3]:  # Limit to first 3 authors
+                first_clean = first.rstrip('.')
+                authors.append(Author(
+                    fnm=first_clean,
+                    surname=last,
+                    full_name=f"{first_clean} {last}"
+                ))
+                logger.info(f"✅ Added author: {first_clean} {last}")
         
         return authors
     
+    def _extract_authors_enhanced_patterns(self, text: str) -> List[Author]:
+        """Enhanced pattern-based author extraction as final fallback"""
+        authors = []
+        
+        # Pattern 1: [1] Author1, Author2, Author3. format
+        pattern1 = r'\[\d+\]\s+([^.]+)\.'
+        match1 = re.search(pattern1, text)
+        if match1:
+            authors_text = match1.group(1).strip()
+            logger.info(f"🔍 Found authors text: {authors_text}")
+            
+            # Split by comma and parse each author
+            author_parts = [part.strip() for part in authors_text.split(',')]
+            for part in author_parts:
+                if part:
+                    author = self._parse_author_part(part)
+                    if author:
+                        authors.append(author)
+                        logger.info(f"✅ Parsed author: {author.first_name} {author.surname}")
+        
+        # Pattern 2: Author1, Author2, Author3. (without brackets)
+        if not authors:
+            pattern2 = r'^([^.]+)\.'
+            match2 = re.search(pattern2, text)
+            if match2:
+                authors_text = match2.group(1).strip()
+                logger.info(f"🔍 Found authors text (no brackets): {authors_text}")
+                
+                # Split by comma and parse each author
+                author_parts = [part.strip() for part in authors_text.split(',')]
+                for part in author_parts:
+                    if part:
+                        author = self._parse_author_part(part)
+                        if author:
+                            authors.append(author)
+                            logger.info(f"✅ Parsed author: {author.first_name} {author.surname}")
+        
+        # Pattern 3: Last, First. (Year) format
+        if not authors:
+            pattern3 = r'([A-Z][a-z]+),\s*([A-Z][a-z.]+)\s*\((\d{4})\)'
+            matches3 = re.findall(pattern3, text)
+            
+            for last, first, year in matches3:
+                first_clean = first.rstrip('.')
+                authors.append(Author(
+                    fnm=first_clean,
+                    surname=last,
+                    full_name=f"{first_clean} {last}"
+                ))
+                logger.info(f"✅ Added author: {first_clean} {last}")
+        
+        # Pattern 4: First Last format (multiple authors)
+        if not authors:
+            pattern4 = r'([A-Z][a-z.]+)\s+([A-Z][a-z]+)'
+            matches4 = re.findall(pattern4, text)
+            
+            for first, last in matches4[:3]:  # Limit to first 3 authors
+                first_clean = first.rstrip('.')
+                authors.append(Author(
+                    fnm=first_clean,
+                    surname=last,
+                    full_name=f"{first_clean} {last}"
+                ))
+                logger.info(f"✅ Added author: {first_clean} {last}")
+        
+        return authors
+    
+    def _parse_author_part(self, author_text: str) -> Optional[Author]:
+        """Parse a single author part (e.g., 'Church KW' or 'Chen Z')"""
+        try:
+            author_text = author_text.strip()
+            if not author_text:
+                return None
+            
+            # Handle different formats
+            if ',' in author_text:
+                # "Last, First" format
+                parts = author_text.split(',', 1)
+                surname = parts[0].strip()
+                first_name = parts[1].strip().rstrip('.')
+            else:
+                # "First Last" format (most common for academic references)
+                parts = author_text.split()
+                if len(parts) >= 2:
+                    first_name = parts[0]
+                    surname = ' '.join(parts[1:])
+                elif len(parts) == 1:
+                    # Single name - treat as surname
+                    surname = parts[0]
+                    first_name = ""
+                else:
+                    return None
+            
+            return Author(
+                fnm=first_name,
+                surname=surname,
+                full_name=f"{first_name} {surname}".strip()
+            )
+        except Exception as e:
+            logger.warning(f"❌ Error parsing author part '{author_text}': {e}")
+            return None
+    
     def _extract_journal_nlp(self, reference: ReferenceData, doc, text: str):
-        """Extract journal using NLP analysis"""
+        """Extract journal using NLP analysis with improved academic reference support"""
         logger.info("📰 Extracting journal with NLP...")
         
-        # Strategy 1: Look for ORG entities (journals are often organizations)
+        # Strategy 1: Pattern-based extraction for academic references
+        # Pattern: [1] Authors. Title. Journal Year;Volume(Issue):Pages
+        pattern1 = r'\[\d+\]\s+[^.]+\.\s+[^.]+\.\s+([^.]+)\s+\d{4}'
+        match1 = re.search(pattern1, text)
+        if match1:
+            journal = match1.group(1).strip()
+            if len(journal.split()) >= 2:  # Reasonable journal name length
+                reference.journal = journal
+                logger.info(f"✅ Found journal via academic pattern: {reference.journal}")
+                return
+        
+        # Pattern: Authors. Title. Journal Year;Volume(Issue):Pages (without brackets)
+        pattern2 = r'^[^.]+\.\s+[^.]+\.\s+([^.]+)\s+\d{4}'
+        match2 = re.search(pattern2, text)
+        if match2:
+            journal = match2.group(1).strip()
+            if len(journal.split()) >= 2:  # Reasonable journal name length
+                reference.journal = journal
+                logger.info(f"✅ Found journal via academic pattern (no brackets): {reference.journal}")
+                return
+        
+        # Strategy 2: Look for ORG entities (journals are often organizations)
         for ent in doc.ents:
             if ent.label_ == "ORG":
                 # Check if it looks like a journal name
@@ -273,7 +461,7 @@ class NLPReferenceParser:
                     logger.info(f"✅ Found journal via ORG entity: {reference.journal}")
                     return
         
-        # Strategy 2: Use sentence analysis to find journal
+        # Strategy 3: Use sentence analysis to find journal
         sentences = sent_tokenize(text)
         if len(sentences) >= 2:
             # Journal is usually in the last sentence
@@ -287,7 +475,7 @@ class NLPReferenceParser:
                 logger.info(f"✅ Found journal via sentence analysis: {reference.journal}")
                 return
         
-        # Strategy 3: Pattern-based fallback
+        # Strategy 4: Pattern-based fallback
         journal = self._extract_journal_pattern_based(text)
         if journal:
             reference.journal = journal

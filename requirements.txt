@@ -19,3 +19,11 @@ torch>=2.0.0
 scikit-learn>=1.3.0
 nltk>=3.8.0
 en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl#sha256=1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85
+
+# PDF Processing Libraries (Simplified - no appjsonify)
+pdfplumber>=0.9.0
+pymupdf>=1.23.0
+tqdm>=4.64.0
+pillow>=9.0.0
+pdf2image>=1.16.0
+aiofiles>=23.0.0

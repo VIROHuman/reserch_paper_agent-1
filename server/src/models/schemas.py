@@ -65,6 +65,24 @@ class TaggingResponse(BaseModel):
     errors: List[str] = []
 
 
+class PDFUploadRequest(BaseModel):
+    """Request for PDF upload and processing"""
+    process_references: bool = True
+    validate_all: bool = True
+    paper_type: str = "auto"
+    use_ml: bool = True
+
+
+class PDFProcessingResponse(BaseModel):
+    """Response for PDF processing"""
+    success: bool
+    message: str
+    data: Dict[str, Any]
+    file_info: Dict[str, str]
+    references_found: int
+    processing_results: List[Dict[str, Any]]
+
+
 class APIResponse(BaseModel):
     """Generic API response"""
     success: bool

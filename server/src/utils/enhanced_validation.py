@@ -9,6 +9,7 @@ from difflib import SequenceMatcher
 
 from ..models.schemas import ReferenceData, ValidationResult, Author
 from ..utils.api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient
+from ..utils.parallel_api_client import ParallelAPIClient
 
 
 @dataclass
@@ -52,6 +53,7 @@ class EnhancedReferenceValidator:
         self.openalex_client = OpenAlexClient()
         self.semantic_client = SemanticScholarClient()
         self.doaj_client = DOAJClient()
+        self.parallel_client = ParallelAPIClient()
         
         # Hallucination detection thresholds
         self.min_confidence_threshold = 0.3
@@ -192,31 +194,32 @@ class EnhancedReferenceValidator:
         original_text: str, 
         missing_fields: List[str]
     ) -> Dict[str, CrossCheckResult]:
-        """Cross-check missing fields across multiple APIs"""
+        """Cross-check missing fields across multiple APIs using parallel processing"""
         logger.info(f"🔍 CROSS-CHECKING MISSING FIELDS: {missing_fields}")
         
         # Build search query
         search_query = self._build_search_query(reference, original_text)
         logger.info(f"🔍 SEARCH QUERY: '{search_query}'")
         
-        # Search across all APIs
-        api_results = {}
-        apis = {
-            "crossref": self.crossref_client,
-            "openalex": self.openalex_client,
-            "semantic_scholar": self.semantic_client,
-            "doaj": self.doaj_client
-        }
-        
-        for api_name, client in apis.items():
-            logger.info(f"🔍 Searching {api_name.upper()}...")
-            try:
-                results = await client.search_reference(search_query, limit=3)
-                api_results[api_name] = results
-                logger.info(f"✅ {api_name.upper()} returned {len(results)} results")
-            except Exception as e:
-                logger.warning(f"❌ Error searching {api_name}: {str(e)}")
-                api_results[api_name] = []
+        # Use parallel API client for faster processing
+        try:
+            logger.info("🚀 Starting parallel API search...")
+            api_results = await self.parallel_client.search_reference_parallel(
+                search_query, 
+                limit=3, 
+                max_apis=4, 
+                timeout=10.0
+            )
+            logger.info(f"✅ Parallel search completed: {len(api_results)} APIs responded")
+        except Exception as e:
+            logger.error(f"❌ Parallel search failed: {str(e)}")
+            # Fallback to empty results
+            api_results = {
+                "CrossRef": [],
+                "OpenAlex": [],
+                "SemanticScholar": [],
+                "DOAJ": []
+            }
         
         # Cross-check each missing field
         cross_check_results = {}
@@ -224,7 +227,7 @@ class EnhancedReferenceValidator:
         for field in missing_fields:
             logger.info(f"🔍 Cross-checking field: {field}")
             cross_check_results[field] = await self._cross_check_field(
-                field, reference, api_results, apis
+                field, reference, api_results
             )
             logger.info(f"✅ Field {field} cross-check complete")
         
@@ -234,8 +237,7 @@ class EnhancedReferenceValidator:
         self, 
         field: str, 
         original_reference: ReferenceData, 
-        api_results: Dict[str, List[ReferenceData]],
-        apis: Dict[str, Any]
+        api_results: Dict[str, List[ReferenceData]]
     ) -> CrossCheckResult:
         """Cross-check a specific field across APIs"""
         

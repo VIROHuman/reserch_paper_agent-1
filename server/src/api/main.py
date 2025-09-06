@@ -1,9 +1,8 @@
 """
 FastAPI application entry point
 """
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from loguru import logger
 import sys
 from contextlib import asynccontextmanager
@@ -11,18 +10,20 @@ from contextlib import asynccontextmanager
 from ..config import settings
 from ..models.schemas import (
     ReferenceValidationRequest, 
-    ReferenceValidationResponse,
     TaggingRequest,
-    TaggingResponse,
     APIResponse,
-    ReferenceData
+    ReferenceData,
+    PDFUploadRequest,
+    PDFProcessingResponse
 )
-# from ..agents.reference_agent import ReferenceProcessingAgent, ReferenceEnhancementAgent
 from ..utils.validation import ReferenceValidator
 from ..utils.enhanced_validation import EnhancedReferenceValidator
 from ..utils.reference_parser import ReferenceParser
 from ..utils.tagging import ReferenceTagger
 from ..utils.api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient
+from ..utils.parallel_api_client import ParallelAPIClient
+from ..utils.appjsonify_integration import PDFReferenceExtractor
+from ..utils.file_handler import FileHandler
 
 
 # Configure logging
@@ -37,7 +38,7 @@ logger.add(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
-    global validator, enhanced_validator, parser, tagger
+    global validator, enhanced_validator, parser, tagger, pdf_extractor, file_handler, parallel_client
     
     logger.info("Starting Research Paper Reference Agent API")
     
@@ -48,6 +49,9 @@ async def lifespan(app: FastAPI):
         enhanced_validator = EnhancedReferenceValidator()
         parser = ReferenceParser()
         tagger = ReferenceTagger()
+        pdf_extractor = PDFReferenceExtractor()
+        file_handler = FileHandler()
+        parallel_client = ParallelAPIClient()
         logger.info("Utilities initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize utilities: {str(e)}")
@@ -80,6 +84,9 @@ validator = None
 enhanced_validator = None
 parser = None
 tagger = None
+pdf_extractor = None
+file_handler = None
+parallel_client = None
 
 
 
@@ -93,13 +100,15 @@ async def root():
         data={
             "version": "1.0.0",
             "endpoints": [
-                "/validate",
                 "/validate-enhanced",
                 "/enhance",
                 "/tag",
                 "/process",
+                "/upload-pdf",
+                "/extract-references-only",
                 "/health",
-                "/apis/status"
+                "/apis/status",
+                "/parallel-api-status"
             ]
         }
     )
@@ -431,6 +440,212 @@ async def check_api_status():
     except Exception as e:
         logger.error(f"API status check error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/parallel-api-status")
+async def check_parallel_api_status():
+    """Check status of parallel API client"""
+    try:
+        if not parallel_client:
+            raise HTTPException(status_code=500, detail="Parallel API client not initialized")
+        
+        status = parallel_client.get_api_status()
+        
+        return APIResponse(
+            success=True,
+            message="Parallel API status retrieved successfully",
+            data={
+                "parallel_client_status": "active",
+                "api_configurations": status,
+                "total_apis": len(status),
+                "enabled_apis": len([api for api in status.values() if api["enabled"]])
+            }
+        )
+    except Exception as e:
+        logger.error(f"Parallel API status check error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/upload-pdf", response_model=APIResponse)
+async def upload_and_process_pdf(
+    file: UploadFile = File(...),
+    paper_type: str = Form("auto"),
+    use_ml: bool = Form(True),
+    process_references: bool = Form(True),
+    validate_all: bool = Form(True)
+):
+    """Upload PDF and extract/process references using appjsonify"""
+    try:
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+        
+        if not pdf_extractor or not file_handler:
+            raise HTTPException(status_code=500, detail="PDF processing utilities not initialized")
+        
+        # Save uploaded file
+        file_path = await file_handler.save_uploaded_file(file)
+        
+        try:
+            # Detect paper type if auto
+            if paper_type == "auto":
+                paper_type = pdf_extractor.detect_paper_type(file_path)
+            
+            # Process PDF with simplified extractor
+            pdf_result = await pdf_extractor.process_pdf_with_extraction(
+                file_path, paper_type, use_ml
+            )
+            
+            if not pdf_result["success"]:
+                return APIResponse(
+                    success=False,
+                    message=f"PDF processing failed: {pdf_result['error']}",
+                    data={"file_info": {"filename": file.filename, "size": file.size}}
+                )
+            
+            references = pdf_result["references"]
+            
+            if not references:
+                return APIResponse(
+                    success=False,
+                    message="No references found in PDF",
+                    data={
+                        "file_info": {"filename": file.filename, "size": file.size},
+                        "paper_type": paper_type,
+                        "paper_data": pdf_result["paper_data"]
+                    }
+                )
+            
+            # Process references if requested
+            processing_results = []
+            if process_references and enhanced_validator and parser:
+                for i, ref_text in enumerate(references):
+                    try:
+                        # Parse reference
+                        reference_data = parser.parse_reference(ref_text)
+                        
+                        # Enhanced validation
+                        validation_result = await enhanced_validator.validate_reference_enhanced(
+                            reference_data, ref_text, enable_cross_checking=True
+                        )
+                        
+                        processing_results.append({
+                            "index": i,
+                            "original_text": ref_text,
+                            "parsed_data": reference_data.dict(),
+                            "validation": {
+                                "is_valid": validation_result.is_valid,
+                                "missing_fields": validation_result.missing_fields,
+                                "confidence_score": validation_result.confidence_score,
+                                "warnings": validation_result.warnings,
+                                "cross_check_results": {
+                                    field: {
+                                        "consensus_value": result.consensus_value,
+                                        "consensus_confidence": result.consensus_confidence,
+                                        "is_hallucinated": result.is_hallucinated,
+                                        "hallucination_reason": result.hallucination_reason,
+                                        "found_in_apis": list(result.found_values.keys()),
+                                        "missing_from_apis": result.missing_from_apis
+                                    } for field, result in validation_result.cross_check_results.items()
+                                },
+                                "hallucination_detected": validation_result.hallucination_detected,
+                                "api_coverage": validation_result.api_coverage
+                            }
+                        })
+                    except Exception as e:
+                        processing_results.append({
+                            "index": i,
+                            "original_text": ref_text,
+                            "error": str(e)
+                        })
+            
+            return APIResponse(
+                success=True,
+                message=f"PDF processed successfully using appjsonify. Found {len(references)} references.",
+                data={
+                    "file_info": {
+                        "filename": file.filename,
+                        "size": file.size,
+                        "references_found": len(references)
+                    },
+                    "paper_type": paper_type,
+                    "paper_data": pdf_result["paper_data"],
+                    "references": references,
+                    "processing_results": processing_results
+                }
+            )
+        
+        finally:
+            # Clean up uploaded file
+            file_handler.cleanup_file(file_path)
+    
+    except Exception as e:
+        logger.error(f"PDF processing error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/extract-references-only", response_model=APIResponse)
+async def extract_references_only(file: UploadFile = File(...)):
+    """Upload PDF and extract references without processing"""
+    try:
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+        
+        if not pdf_extractor or not file_handler:
+            raise HTTPException(status_code=500, detail="PDF processing utilities not initialized")
+        
+        file_path = await file_handler.save_uploaded_file(file)
+        
+        try:
+            # Detect paper type
+            paper_type = pdf_extractor.detect_paper_type(file_path)
+            
+            # Process PDF with simplified extractor
+            pdf_result = await pdf_extractor.process_pdf_with_extraction(
+                file_path, paper_type, use_ml=True
+            )
+            
+            if not pdf_result["success"]:
+                return APIResponse(
+                    success=False,
+                    message=f"PDF processing failed: {pdf_result['error']}",
+                    data={"file_info": {"filename": file.filename, "size": file.size}}
+                )
+            
+            references = pdf_result["references"]
+            
+            return APIResponse(
+                success=True,
+                message=f"Extracted {len(references)} references from PDF",
+                data={
+                    "file_info": {"filename": file.filename, "size": file.size},
+                    "paper_type": paper_type,
+                    "references": references,
+                    "paper_data": pdf_result["paper_data"]
+                }
+            )
+        
+        finally:
+            file_handler.cleanup_file(file_path)
+    
+    except Exception as e:
+        logger.error(f"Reference extraction error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/supported-paper-types")
+async def get_supported_paper_types():
+    """Get list of supported paper types for PDF processing"""
+    if not pdf_extractor:
+        raise HTTPException(status_code=500, detail="PDF processing utilities not initialized")
+    
+    return APIResponse(
+        success=True,
+        message="Supported paper types retrieved",
+        data={
+            "supported_types": pdf_extractor.get_supported_paper_types(),
+            "description": "Use these paper types for better PDF processing accuracy"
+        }
+    )
 
 
 if __name__ == "__main__":

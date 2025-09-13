@@ -1,71 +1,66 @@
-# Research Paper Reference Agent
+# Research Paper Reference Agent - Enhanced
 
-A comprehensive system for validating, enhancing, and tagging research paper references using LangChain, FastAPI, and multiple academic APIs.
+A comprehensive FastAPI application for extracting and parsing research paper references from PDFs with AI-powered parsing and external API enrichment.
 
 ## Features
 
-### Task 1: Reference Validation & Enhancement
-- **Missing Field Detection**: Identifies missing fields in research paper references
-- **Multi-API Integration**: Uses CrossRef, OpenAlex, Semantic Scholar, and GROBID APIs
-- **AI-Powered Enhancement**: LangChain agents to fetch missing information
-- **Hallucination Prevention**: Transparent reporting of what data could not be found
-
-### Task 2: HTML Tagging
-- **Multiple Formats**: Support for Elsevier, Sage Publishing, and custom styles
-- **Structured Output**: Generates properly formatted XML/HTML tags
-- **Batch Processing**: Handles large datasets efficiently
+- **PDF Reference Extraction**: Extract references from academic PDFs using multiple methods
+- **Dual Parsing**: Simple regex-based parser and Ollama AI-powered parser
+- **API Enrichment**: Automatically fill missing fields using external academic APIs
+- **Reference Tagging**: Generate structured XML output for references with enhanced information
+- **Multiple Paper Types**: Support for various academic paper formats
+- **External API Integration**: CrossRef, OpenAlex, Semantic Scholar, and DOAJ
+- **Clean Architecture**: Modular, maintainable codebase
 
 ## Project Structure
 
 ```
 server/
 ├── src/
-│   ├── agents/
-│   │   └── reference_agent.py      # LangChain agents for reference processing
-│   ├── utils/
-│   │   ├── tools.py               # Custom LangChain tools
-│   │   ├── api_clients.py         # API clients for academic databases
-│   │   ├── validation.py          # Reference validation logic
-│   │   ├── tagging.py             # HTML tagging system
-│   │   └── db_utils.py            # Database utilities
-│   ├── models/
-│   │   └── schemas.py             # Pydantic models
 │   ├── api/
-│   │   └── main.py                # FastAPI application
-│   └── config.py                  # Configuration settings
+│   │   ├── main.py              # Full-featured API (legacy)
+│   │   └── main_simple.py       # Simplified API (recommended)
+│   ├── utils/
+│   │   ├── pdf_processor.py     # PDF extraction and processing
+│   │   ├── simple_parser.py     # Regex-based reference parser
+│   │   ├── ollama_parser.py     # AI-powered reference parser
+│   │   ├── enhanced_parser.py   # Enhanced parser with API integration
+│   │   ├── file_handler.py      # File upload management
+│   │   └── api_clients.py       # External API clients
+│   ├── models/
+│   │   └── schemas.py           # Pydantic data models
+│   └── config.py                # Configuration settings
 ├── requirements.txt
-└── README.md
+└── run_server.py
 ```
 
 ## Installation
 
 ### Prerequisites
 - Python 3.8+
-- System dependencies for lxml
+- Ollama (optional, for AI-powered parsing)
 
 ### Setup
 
-1. **Install system dependencies** (Ubuntu/Debian):
-```bash
-sudo apt-get update
-sudo apt-get install -y libxml2-dev libxslt1-dev python3-dev
-```
-
-2. **Clone and setup the project**:
+1. **Clone and setup the project**:
 ```bash
 git clone <repository-url>
 cd reserch_paper_agent
 pip install -r requirements.txt
 ```
 
-3. **Configure environment variables**:
+2. **Install Ollama (optional)**:
+```bash
+# Install Ollama
+curl -fsSL https://ollama.ai/install.sh | sh
+
+# Pull a model (e.g., Gemma)
+ollama pull gemma3:1b
+```
+
+3. **Configure environment variables** (optional):
 Create a `.env` file in the project root:
 ```env
-# API Keys
-OPENAI_API_KEY=your_openai_api_key_here
-CROSSREF_API_KEY=your_crossref_api_key_here
-SEMANTIC_SCHOLAR_API_KEY=your_semantic_scholar_api_key_here
-
 # Application Settings
 DEBUG=True
 LOG_LEVEL=INFO
@@ -78,135 +73,140 @@ PORT=8000
 ### Starting the Server
 
 ```bash
-cd server
-python -m src.api.main
+python run_server.py
 ```
 
 The API will be available at `http://localhost:8000`
 
 ### API Endpoints
 
-#### 1. Validate References
+#### 1. Health Check
 ```bash
-curl -X POST "http://localhost:8000/validate" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "references": [
-      "Hu, J. (2020). Student-centered Teaching Studying Community: Exploration on the Index of Reconstructing the Evaluation Standard of Teaching in Universities. Educational Teaching Forum, 2020 (18), 5–7.",
-      "Mireshghallah F, Taram M, Vepakomma P, Singh A, Raskar R, Esmaeilzadeh H. Privacy in deep learning: A survey. 2020, arXiv preprint arXiv:2004.12254."
-    ]
-  }'
+curl http://localhost:8000/health
 ```
 
-#### 2. Enhance References
+#### 2. Upload and Process PDF
 ```bash
-curl -X POST "http://localhost:8000/enhance" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "references": [
-      "Incomplete reference with missing fields..."
-    ]
-  }'
+curl -X POST "http://localhost:8000/upload-pdf" \
+  -F "file=@your_paper.pdf" \
+  -F "paper_type=auto" \
+  -F "use_ml=true" \
+  -F "use_ollama=true" \
+  -F "enable_api_enrichment=true"
 ```
 
-#### 3. Tag References
+**Parameters:**
+- `file`: PDF file to process
+- `paper_type`: Type of paper (auto, ACL, AAAI, IEEE, Generic)
+- `use_ml`: Enable ML-based processing (default: true)
+- `use_ollama`: Use Ollama AI parser (default: true)
+- `enable_api_enrichment`: Enable API enrichment for missing fields (default: true)
+
+#### 3. Parse Single Reference
 ```bash
-curl -X POST "http://localhost:8000/tag" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "references": [
-      {
-        "title": "Sample Title",
-        "authors": [{"first_name": "John", "surname": "Doe"}],
-        "year": 2023,
-        "journal": "Sample Journal"
-      }
-    ],
-    "style": "elsevier"
-  }'
+curl -X POST "http://localhost:8000/parse-reference" \
+  -F "reference_text=Smith, J. (2023). Machine Learning in Healthcare. Nature Medicine, 15(3), 123-130." \
+  -F "use_ollama=true" \
+  -F "enable_api_enrichment=true"
 ```
 
-#### 4. Complete Processing Pipeline
-```bash
-curl -X POST "http://localhost:8000/process" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "references": [
-      "Your reference text here..."
-    ],
-    "validate_all": true
-  }'
-```
+### Example Response
 
-### Example Output
-
-#### Validation Result
 ```json
 {
   "success": true,
-  "message": "Validated 2 references",
+  "message": "PDF processed successfully. Found 25 references, processed 25 successfully. 18 references enriched with API data.",
   "data": {
-    "processed_count": 2,
-    "total_count": 2,
-    "results": [
+    "file_info": {
+      "filename": "research_paper.pdf",
+      "size": 2048576,
+      "references_found": 25,
+      "successfully_processed": 25
+    },
+    "paper_type": "ACL",
+    "parser_used": "enhanced",
+    "api_enrichment_enabled": true,
+    "summary": {
+      "total_references": 25,
+      "successfully_processed": 25,
+      "enriched_with_apis": 18,
+      "total_extracted_fields": 150,
+      "total_missing_fields": 12
+    },
+    "processing_results": [
       {
         "index": 0,
-        "original_text": "Hu, J. (2020)...",
-        "is_valid": true,
-        "missing_fields": ["volume", "issue"],
-        "confidence_score": 0.85,
-        "suggestions": {
-          "volume": {
-            "candidates": ["2020"],
-            "confidence": 0.7
-          }
+        "original_text": "Smith, J. (2023). Machine Learning in Healthcare. Nature Medicine, 15(3), 123-130.",
+        "parser_used": "ollama",
+        "api_enrichment_used": true,
+        "enrichment_sources": ["crossref", "openalex"],
+        "extracted_fields": {
+          "family_names": ["Smith"],
+          "given_names": ["J"],
+          "year": "2023",
+          "title": "Machine Learning in Healthcare",
+          "journal": "Nature Medicine",
+          "doi": "10.1038/s41591-023-02456-7",
+          "pages": "123-130",
+          "publisher": "Nature Publishing Group",
+          "url": "https://www.nature.com/articles/s41591-023-02456-7",
+          "abstract": "Machine learning applications in healthcare have shown..."
         },
-        "warnings": []
+        "missing_fields": [],
+        "tagged_output": "<reference id=\"ref1\">...</reference>"
       }
     ]
   }
 }
 ```
 
-#### Tagged Reference (Elsevier Style)
-```xml
-<reference id="ref1">
-<label>Hu, 2020</label>
-<authors>
-<author>
-<fnm>J.</fnm>
-<surname>Hu</surname>
-</author>
-</authors>
-<title><maintitle>Student-centered Teaching Studying Community: Exploration on the Index of Reconstructing the Evaluation Standard of Teaching in Universities</maintitle></title>
-<host>
-<issue>
-<series>
-<title><maintitle>Educational Teaching Forum</maintitle></title>
-<volume>2020</volume>
-</series>
-<issue>18</issue>
-<date>2020</date>
-</issue>
-<pages>
-<fpage>5</fpage>
-<lpage>7</lpage>
-</pages>
-</host>
-</reference>
-```
+## Parsers
+
+### Enhanced Parser (Recommended)
+- Combines local parsing with API enrichment
+- Automatically fills missing fields using external APIs
+- Supports both simple and Ollama parsing
+- Provides comprehensive reference information
+
+### Simple Parser
+- Uses regex patterns to extract reference fields
+- Fast and lightweight
+- Good for well-formatted references
+- No external dependencies
+
+### Ollama Parser
+- Uses AI models (Gemma) for intelligent parsing
+- Better handling of complex reference formats
+- Requires Ollama to be running
+- More accurate but slower
+
+## API Enrichment
+
+The enhanced parser automatically enriches references using multiple academic APIs:
+
+- **CrossRef**: Academic metadata and DOI information
+- **OpenAlex**: Open academic data and abstracts
+- **Semantic Scholar**: AI-powered research information
+- **DOAJ**: Directory of Open Access Journals
+
+### Enrichment Features
+- Automatically fills missing fields (DOI, publisher, URL, abstract)
+- Cross-references information across multiple APIs
+- Maintains data quality by only filling missing fields
+- Provides source attribution for enriched data
 
 ## Configuration
 
-### API Keys
-- **OpenAI**: Required for LangChain agents
-- **CrossRef**: Optional, for enhanced API access
-- **Semantic Scholar**: Optional, for enhanced API access
+### Paper Types
+- `auto`: Automatically detect paper type
+- `ACL`: ACL-style papers
+- `AAAI`: AAAI/IJCAI papers
+- `IEEE`: IEEE papers
+- `Generic`: Generic academic papers
 
-### Supported Tagging Styles
-- `elsevier`: Elsevier publishing format
-- `sage`: Sage Publishing format  
-- `custom`: Basic custom format
+### Parsing Options
+- `use_ml`: Enable ML-based PDF processing
+- `use_ollama`: Use Ollama AI parser (requires Ollama)
 
 ## Development
 
@@ -216,52 +216,39 @@ pytest
 ```
 
 ### Code Structure
-- **Agents**: LangChain-based AI agents for reference processing
-- **API Clients**: Async clients for external academic APIs
-- **Validation**: Rule-based and AI-powered reference validation
-- **Tagging**: XML/HTML generation for various publishing formats
-- **Database**: SQLite-based logging and statistics
+- **PDF Processing**: `pdf_processor.py` handles PDF extraction
+- **Reference Parsing**: `simple_parser.py` and `ollama_parser.py` handle reference parsing
+- **File Management**: `file_handler.py` manages file uploads
+- **API Clients**: `api_clients.py` provides external API integration
 
-### Adding New APIs
-1. Create a new client class in `api_clients.py`
-2. Add configuration in `config.py`
-3. Integrate with agents in `reference_agent.py`
+### Adding New Parsers
+1. Create a new parser class in `utils/`
+2. Implement `parse_reference()` and `generate_tagged_output()` methods
+3. Add the parser to `main_simple.py`
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **lxml Installation Error**:
-   ```bash
-   sudo apt-get install libxml2-dev libxslt1-dev python3-dev
-   pip install lxml
-   ```
+1. **Ollama not found**:
+   - Install Ollama: `curl -fsSL https://ollama.ai/install.sh | sh`
+   - Pull a model: `ollama pull gemma3:1b`
 
-2. **API Key Issues**:
-   - Ensure all required API keys are set in `.env`
-   - Check API key validity and permissions
+2. **PDF processing errors**:
+   - Ensure PDF is not password-protected
+   - Check file size limits
+   - Verify PDF contains text (not just images)
 
-3. **Memory Issues with Large Datasets**:
-   - Process references in smaller batches
-   - Monitor memory usage and adjust batch sizes
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
+3. **Memory issues**:
+   - Process smaller PDFs
+   - Reduce concurrent processing
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License.
 
 ## Acknowledgments
 
-- CrossRef API for reference metadata
-- OpenAlex for open academic data
-- Semantic Scholar for AI-powered research
-- GROBID for reference parsing
-- LangChain for AI agent framework
+- Ollama for AI model integration
+- pdfplumber and PyMuPDF for PDF processing
 - FastAPI for the web framework

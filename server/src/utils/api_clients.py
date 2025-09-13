@@ -101,6 +101,130 @@ class CrossRefClient:
                     continue
         
         return references
+    
+    async def get_doi_metadata(self, doi: str) -> Dict[str, Any]:
+        """Get metadata for a specific DOI from CrossRef"""
+        logger.info(f"🔍 CROSSREF DOI METADATA: {doi}")
+        try:
+            # Normalize DOI
+            normalized_doi = self._normalize_doi(doi)
+            if not normalized_doi:
+                return {"error": "Invalid DOI format"}
+            
+            async with httpx.AsyncClient() as client:
+                url = f"{self.base_url}/works/{normalized_doi}"
+                
+                logger.info(f"📡 CrossRef DOI URL: {url}")
+                
+                response = await client.get(
+                    url,
+                    headers=self.headers,
+                    timeout=30.0
+                )
+                logger.info(f"📡 CrossRef DOI response status: {response.status_code}")
+                response.raise_for_status()
+                
+                data = response.json()
+                logger.info(f"📡 CrossRef DOI response keys: {list(data.keys())}")
+                
+                if "message" not in data:
+                    return {"error": "No message in CrossRef response"}
+                
+                metadata = self._parse_crossref_doi_metadata(data["message"])
+                logger.info(f"✅ CrossRef DOI metadata extracted successfully")
+                return metadata
+                
+        except Exception as e:
+            logger.error(f"❌ CrossRef DOI API error: {str(e)}")
+            return {"error": str(e)}
+    
+    def _normalize_doi(self, doi: str) -> str:
+        """Normalize DOI: strip spaces, ensure lowercase, remove prefixes"""
+        if not doi:
+            return ""
+        
+        # Strip whitespace
+        doi = doi.strip()
+        
+        # Remove any existing https://doi.org/ prefix
+        if doi.startswith("https://doi.org/"):
+            doi = doi[16:]
+        elif doi.startswith("http://doi.org/"):
+            doi = doi[15:]
+        elif doi.startswith("doi.org/"):
+            doi = doi[8:]
+        
+        # Ensure it starts with 10.
+        if not doi.startswith("10."):
+            logger.warning(f"⚠️ Invalid DOI format: {doi}")
+            return ""
+        
+        # Convert to lowercase
+        doi = doi.lower()
+        
+        return doi
+    
+    def _parse_crossref_doi_metadata(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse CrossRef DOI metadata into standardized format"""
+        try:
+            # Extract authors
+            authors = []
+            if "author" in item:
+                for author in item["author"]:
+                    given = author.get("given", "")
+                    family = author.get("family", "")
+                    full_name = f"{given} {family}".strip()
+                    if full_name:
+                        authors.append(full_name)
+            
+            # Extract publication year
+            year = None
+            if "published-print" in item and "date-parts" in item["published-print"]:
+                year = item["published-print"]["date-parts"][0][0]
+            elif "published-online" in item and "date-parts" in item["published-online"]:
+                year = item["published-online"]["date-parts"][0][0]
+            elif "published" in item and "date-parts" in item["published"]:
+                year = item["published"]["date-parts"][0][0]
+            
+            # Extract title
+            title = None
+            if "title" in item and item["title"]:
+                title = item["title"][0] if isinstance(item["title"], list) else item["title"]
+            
+            # Extract journal/conference
+            journal = None
+            if "container-title" in item and item["container-title"]:
+                journal = item["container-title"][0] if isinstance(item["container-title"], list) else item["container-title"]
+            
+            # Extract abstract
+            abstract = None
+            if "abstract" in item:
+                abstract = item["abstract"]
+            
+            # Extract citation count
+            citation_count = None
+            if "is-referenced-by-count" in item:
+                citation_count = item["is-referenced-by-count"]
+            
+            return {
+                "doi": item.get("DOI", "").lower(),
+                "title": title,
+                "authors": authors,
+                "journal": journal,
+                "publisher": item.get("publisher"),
+                "year": year,
+                "volume": item.get("volume"),
+                "issue": item.get("issue"),
+                "pages": item.get("page"),
+                "abstract": abstract,
+                "url": f"https://doi.org/{item.get('DOI', '').lower()}" if item.get("DOI") else None,
+                "citation_count": citation_count,
+                "source_api": "CrossRef"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error parsing CrossRef DOI metadata: {str(e)}")
+            return {"error": str(e)}
 
 
 class OpenAlexClient:
@@ -212,6 +336,112 @@ class OpenAlexClient:
         
         # Join words in order
         return " ".join([word for _, word in word_positions])
+    
+    async def get_doi_metadata(self, doi: str) -> Dict[str, Any]:
+        """Get metadata for a specific DOI from OpenAlex"""
+        logger.info(f"🔍 OPENALEX DOI METADATA: {doi}")
+        try:
+            # Normalize DOI
+            normalized_doi = self._normalize_doi(doi)
+            if not normalized_doi:
+                return {"error": "Invalid DOI format"}
+            
+            async with httpx.AsyncClient() as client:
+                url = f"{self.base_url}/works/doi:{normalized_doi}"
+                
+                logger.info(f"📡 OpenAlex DOI URL: {url}")
+                
+                response = await client.get(
+                    url,
+                    headers=self.headers,
+                    timeout=30.0
+                )
+                logger.info(f"📡 OpenAlex DOI response status: {response.status_code}")
+                response.raise_for_status()
+                
+                data = response.json()
+                logger.info(f"📡 OpenAlex DOI response keys: {list(data.keys())}")
+                
+                metadata = self._parse_openalex_doi_metadata(data)
+                logger.info(f"✅ OpenAlex DOI metadata extracted successfully")
+                return metadata
+                
+        except Exception as e:
+            logger.error(f"❌ OpenAlex DOI API error: {str(e)}")
+            return {"error": str(e)}
+    
+    def _normalize_doi(self, doi: str) -> str:
+        """Normalize DOI: strip spaces, ensure lowercase, remove prefixes"""
+        if not doi:
+            return ""
+        
+        # Strip whitespace
+        doi = doi.strip()
+        
+        # Remove any existing https://doi.org/ prefix
+        if doi.startswith("https://doi.org/"):
+            doi = doi[16:]
+        elif doi.startswith("http://doi.org/"):
+            doi = doi[15:]
+        elif doi.startswith("doi.org/"):
+            doi = doi[8:]
+        
+        # Ensure it starts with 10.
+        if not doi.startswith("10."):
+            logger.warning(f"⚠️ Invalid DOI format: {doi}")
+            return ""
+        
+        # Convert to lowercase
+        doi = doi.lower()
+        
+        return doi
+    
+    def _parse_openalex_doi_metadata(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Parse OpenAlex DOI metadata into standardized format"""
+        try:
+            # Extract authors
+            authors = []
+            if "authorships" in data:
+                for authorship in data["authorships"]:
+                    author = authorship.get("author", {})
+                    display_name = author.get("display_name")
+                    if display_name:
+                        authors.append(display_name)
+            
+            # Extract abstract
+            abstract = None
+            if "abstract_inverted_index" in data:
+                abstract = self._convert_abstract_index_to_text(data["abstract_inverted_index"])
+            
+            # Extract journal/conference
+            journal = None
+            if "primary_location" in data and "source" in data["primary_location"]:
+                journal = data["primary_location"]["source"].get("display_name")
+            
+            # Extract citation count
+            citation_count = None
+            if "cited_by_count" in data:
+                citation_count = data["cited_by_count"]
+            
+            return {
+                "doi": data.get("doi", "").lower(),
+                "title": data.get("title"),
+                "authors": authors,
+                "journal": journal,
+                "publisher": data.get("primary_location", {}).get("source", {}).get("publisher"),
+                "year": data.get("publication_year"),
+                "volume": data.get("biblio", {}).get("volume"),
+                "issue": data.get("biblio", {}).get("issue"),
+                "pages": data.get("biblio", {}).get("first_page"),
+                "abstract": abstract,
+                "url": data.get("id"),
+                "citation_count": citation_count,
+                "source_api": "OpenAlex"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error parsing OpenAlex DOI metadata: {str(e)}")
+            return {"error": str(e)}
 
 
 class SemanticScholarClient:

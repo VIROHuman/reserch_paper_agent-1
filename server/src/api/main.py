@@ -25,6 +25,10 @@ from ..utils.parallel_api_client import ParallelAPIClient
 from ..utils.appjsonify_integration import PDFReferenceExtractor
 from ..utils.file_handler import FileHandler
 
+# GROBID imports
+from grobid_client.grobid_client import GrobidClient
+import xml.etree.ElementTree as ET
+
 
 # Configure logging
 logger.remove()
@@ -38,7 +42,7 @@ logger.add(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
-    global validator, enhanced_validator, parser, tagger, pdf_extractor, file_handler, parallel_client
+    global validator, enhanced_validator, parser, tagger, pdf_extractor, file_handler, parallel_client, grobid_client
     
     logger.info("Starting Research Paper Reference Agent API")
     
@@ -52,6 +56,10 @@ async def lifespan(app: FastAPI):
         pdf_extractor = PDFReferenceExtractor()
         file_handler = FileHandler()
         parallel_client = ParallelAPIClient()
+        
+        # Initialize GROBID client (lazy initialization - only connect when needed)
+        # Try local first, fallback to web service if needed
+        grobid_client = None  # Will be initialized when first used
         logger.info("Utilities initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize utilities: {str(e)}")
@@ -515,9 +523,9 @@ async def upload_and_process_pdf(
                     }
                 )
             
-            # Process references if requested
+            # Process references with tagging and simplified output
             processing_results = []
-            if process_references and enhanced_validator and parser:
+            if process_references and enhanced_validator and parser and tagger:
                 for i, ref_text in enumerate(references):
                     try:
                         # Parse reference
@@ -528,28 +536,39 @@ async def upload_and_process_pdf(
                             reference_data, ref_text, enable_cross_checking=True
                         )
                         
+                        # Generate tags
+                        tagged_ref = tagger.tag_references([reference_data], "elsevier")[0]
+                        
+                        # Simplified output - only show what's extracted, tagged, and missing
+                        extracted_fields = {}
+                        missing_fields = []
+                        
+                        # Check what was extracted
+                        if reference_data.title:
+                            extracted_fields["title"] = reference_data.title
+                        if reference_data.authors:
+                            extracted_fields["authors"] = reference_data.authors
+                        if reference_data.year:
+                            extracted_fields["year"] = reference_data.year
+                        if reference_data.journal:
+                            extracted_fields["journal"] = reference_data.journal
+                        if reference_data.doi:
+                            extracted_fields["doi"] = reference_data.doi
+                        if reference_data.pages:
+                            extracted_fields["pages"] = reference_data.pages
+                        
+                        # Check what's missing
+                        if validation_result.missing_fields:
+                            missing_fields = validation_result.missing_fields
+                        
                         processing_results.append({
                             "index": i,
                             "original_text": ref_text,
-                            "parsed_data": reference_data.dict(),
-                            "validation": {
-                                "is_valid": validation_result.is_valid,
-                                "missing_fields": validation_result.missing_fields,
-                                "confidence_score": validation_result.confidence_score,
-                                "warnings": validation_result.warnings,
-                                "cross_check_results": {
-                                    field: {
-                                        "consensus_value": result.consensus_value,
-                                        "consensus_confidence": result.consensus_confidence,
-                                        "is_hallucinated": result.is_hallucinated,
-                                        "hallucination_reason": result.hallucination_reason,
-                                        "found_in_apis": list(result.found_values.keys()),
-                                        "missing_from_apis": result.missing_from_apis
-                                    } for field, result in validation_result.cross_check_results.items()
-                                },
-                                "hallucination_detected": validation_result.hallucination_detected,
-                                "api_coverage": validation_result.api_coverage
-                            }
+                            "extracted_fields": extracted_fields,
+                            "tagged_reference": tagged_ref,
+                            "missing_fields": missing_fields,
+                            "confidence_score": validation_result.confidence_score,
+                            "is_valid": validation_result.is_valid
                         })
                     except Exception as e:
                         processing_results.append({
@@ -558,18 +577,28 @@ async def upload_and_process_pdf(
                             "error": str(e)
                         })
             
+            # Calculate summary statistics
+            successful_processing = len([r for r in processing_results if "error" not in r])
+            total_extracted_fields = sum(len(r.get("extracted_fields", {})) for r in processing_results if "error" not in r)
+            total_missing_fields = sum(len(r.get("missing_fields", [])) for r in processing_results if "error" not in r)
+            
             return APIResponse(
                 success=True,
-                message=f"PDF processed successfully using appjsonify. Found {len(references)} references.",
+                message=f"PDF processed successfully. Found {len(references)} references, processed {successful_processing} successfully.",
                 data={
                     "file_info": {
                         "filename": file.filename,
                         "size": file.size,
-                        "references_found": len(references)
+                        "references_found": len(references),
+                        "successfully_processed": successful_processing
                     },
                     "paper_type": paper_type,
-                    "paper_data": pdf_result["paper_data"],
-                    "references": references,
+                    "summary": {
+                        "total_references": len(references),
+                        "successfully_processed": successful_processing,
+                        "total_extracted_fields": total_extracted_fields,
+                        "total_missing_fields": total_missing_fields
+                    },
                     "processing_results": processing_results
                 }
             )
@@ -646,6 +675,175 @@ async def get_supported_paper_types():
             "description": "Use these paper types for better PDF processing accuracy"
         }
     )
+
+
+@app.post("/extract-references-grobid", response_model=APIResponse)
+async def extract_references_with_grobid(file: UploadFile = File(...)):
+    """Upload PDF and extract references using GROBID with structured field extraction"""
+    try:
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+        
+        if not file_handler:
+            raise HTTPException(status_code=500, detail="File handler not initialized")
+        
+        # Initialize GROBID client if not already done
+        global grobid_client
+        if grobid_client is None:
+            # Try local GROBID first, then fallback to web service
+            grobid_servers = [
+                "http://localhost:8070",
+                "https://cloud.science-miner.com/grobid/api"
+            ]
+            
+            for server_url in grobid_servers:
+                try:
+                    grobid_client = GrobidClient(config_path="./config.json")
+                    logger.info(f"GROBID client initialized successfully with server: {server_url}")
+                    break
+                except Exception as e:
+                    logger.warning(f"Failed to connect to GROBID server {server_url}: {str(e)}")
+                    if server_url == grobid_servers[-1]:  # Last server in list
+                        raise HTTPException(
+                            status_code=503, 
+                            detail=f"No GROBID servers available. Tried: {', '.join(grobid_servers)}. Please ensure at least one GROBID server is running."
+                        )
+        
+        # Save uploaded file
+        file_path = await file_handler.save_uploaded_file(file)
+        
+        try:
+            # Process PDF with GROBID
+            logger.info(f"Processing PDF with GROBID: {file.filename}")
+            result = grobid_client.process_pdf(file_path, "processReferences", generateIDs=True, consolidate_citations=True, include_raw_citations=True)
+            
+            if not result:
+                return APIResponse(
+                    success=False,
+                    message="GROBID processing failed - no results returned",
+                    data={"file_info": {"filename": file.filename, "size": file.size}}
+                )
+            
+            # Parse the XML result
+            root = ET.fromstring(result)
+            
+            # Extract references
+            references = []
+            reference_elements = root.findall('.//{http://www.tei-c.org/ns/1.0}ref')
+            
+            for i, ref_elem in enumerate(reference_elements):
+                ref_data = extract_reference_fields(ref_elem, i)
+                if ref_data:
+                    references.append(ref_data)
+            
+            # Also try to get raw citations if available
+            raw_citations = []
+            raw_citation_elements = root.findall('.//{http://www.tei-c.org/ns/1.0}cit')
+            for cit_elem in raw_citation_elements:
+                raw_text = cit_elem.text
+                if raw_text and raw_text.strip():
+                    raw_citations.append(raw_text.strip())
+            
+            return APIResponse(
+                success=True,
+                message=f"GROBID processing completed. Found {len(references)} structured references and {len(raw_citations)} raw citations.",
+                data={
+                    "file_info": {
+                        "filename": file.filename,
+                        "size": file.size,
+                        "structured_references": len(references),
+                        "raw_citations": len(raw_citations)
+                    },
+                    "structured_references": references,
+                    "raw_citations": raw_citations
+                }
+            )
+        
+        finally:
+            # Clean up uploaded file
+            file_handler.cleanup_file(file_path)
+    
+    except Exception as e:
+        logger.error(f"GROBID processing error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def extract_reference_fields(ref_elem, index):
+    """Extract specific fields from a GROBID reference element"""
+    try:
+        ref_data = {
+            "index": index,
+            "family_name": None,
+            "given_name": None,
+            "year": None,
+            "journal": None,
+            "doi": None,
+            "page": None,
+            "title": None
+        }
+        
+        # Extract author information
+        author_elem = ref_elem.find('.//{http://www.tei-c.org/ns/1.0}author')
+        if author_elem is not None:
+            # Family name (surname)
+            surname_elem = author_elem.find('.//{http://www.tei-c.org/ns/1.0}surname')
+            if surname_elem is not None and surname_elem.text:
+                ref_data["family_name"] = surname_elem.text.strip()
+            
+            # Given name (forename)
+            forename_elem = author_elem.find('.//{http://www.tei-c.org/ns/1.0}forename')
+            if forename_elem is not None and forename_elem.text:
+                ref_data["given_name"] = forename_elem.text.strip()
+        
+        # Extract title
+        title_elem = ref_elem.find('.//{http://www.tei-c.org/ns/1.0}title')
+        if title_elem is not None and title_elem.text:
+            ref_data["title"] = title_elem.text.strip()
+        
+        # Extract journal (container title)
+        journal_elem = ref_elem.find('.//{http://www.tei-c.org/ns/1.0}title[@level="j"]')
+        if journal_elem is not None and journal_elem.text:
+            ref_data["journal"] = journal_elem.text.strip()
+        
+        # Extract year
+        date_elem = ref_elem.find('.//{http://www.tei-c.org/ns/1.0}date')
+        if date_elem is not None and date_elem.text:
+            # Try to extract year from date
+            date_text = date_elem.text.strip()
+            import re
+            year_match = re.search(r'\b(19|20)\d{2}\b', date_text)
+            if year_match:
+                ref_data["year"] = year_match.group()
+        
+        # Extract DOI
+        idno_elem = ref_elem.find('.//{http://www.tei-c.org/ns/1.0}idno[@type="DOI"]')
+        if idno_elem is not None and idno_elem.text:
+            ref_data["doi"] = idno_elem.text.strip()
+        
+        # Extract page information
+        biblscope_elem = ref_elem.find('.//{http://www.tei-c.org/ns/1.0}biblScope')
+        if biblscope_elem is not None:
+            # Try to get page range or single page
+            if biblscope_elem.text:
+                ref_data["page"] = biblscope_elem.text.strip()
+            # Also check for 'from' and 'to' attributes
+            elif biblscope_elem.get('from') or biblscope_elem.get('to'):
+                from_page = biblscope_elem.get('from', '')
+                to_page = biblscope_elem.get('to', '')
+                if from_page and to_page:
+                    ref_data["page"] = f"{from_page}-{to_page}"
+                elif from_page:
+                    ref_data["page"] = from_page
+        
+        # Only return if we have at least some data
+        if any(v for v in ref_data.values() if v is not None and v != index):
+            return ref_data
+        
+        return None
+    
+    except Exception as e:
+        logger.warning(f"Error extracting reference fields for index {index}: {str(e)}")
+        return None
 
 
 if __name__ == "__main__":

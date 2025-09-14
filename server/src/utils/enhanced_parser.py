@@ -10,6 +10,7 @@ from .ollama_parser import OllamaReferenceParser
 from .api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient
 from .smart_api_strategy import SmartAPIStrategy
 from .doi_metadata_extractor import DOIMetadataExtractor, DOIMetadataConflictDetector
+from .flagging_system import ReferenceFlaggingSystem
 
 
 class EnhancedReferenceParser:
@@ -32,7 +33,10 @@ class EnhancedReferenceParser:
         self.doi_extractor = DOIMetadataExtractor()
         self.conflict_detector = DOIMetadataConflictDetector()
         
-        logger.info("✅ Enhanced reference parser initialized with Smart API Strategy and DOI extraction")
+        # Initialize flagging system
+        self.flagging_system = ReferenceFlaggingSystem()
+        
+        logger.info("✅ Enhanced reference parser initialized with Smart API Strategy, DOI extraction, and Flagging System")
     
     async def parse_reference_enhanced(
         self, 
@@ -145,6 +149,19 @@ class EnhancedReferenceParser:
                             enriched_ref[field] = value
                             logger.info(f"  Updated {field}: {value}")
                 
+                # Generate comprehensive flagging analysis
+                logger.info(f"🏁 GENERATING COMPREHENSIVE FLAGGING ANALYSIS")
+                flags = self.flagging_system.analyze_reference_extraction(
+                    original_parsed=parsed_ref,
+                    final_result=enriched_ref,
+                    api_enrichment_data=enriched_ref if enriched_ref.get("api_enrichment_used") else None,
+                    doi_metadata=doi_metadata,
+                    conflict_analysis=conflict_analysis
+                )
+                
+                # Add flagging information to the result
+                enriched_ref["flagging_analysis"] = self.flagging_system.format_flags_for_api(flags)
+                
                 return enriched_ref
             else:
                 logger.info(f"⏭️  STEP 2: Skipping API enrichment (disabled)")
@@ -162,6 +179,19 @@ class EnhancedReferenceParser:
                         if value:  # Only update if online data has a value
                             parsed_ref[field] = value
                             logger.info(f"  Updated {field}: {value}")
+                
+                # Generate comprehensive flagging analysis even without API enrichment
+                logger.info(f"🏁 GENERATING COMPREHENSIVE FLAGGING ANALYSIS (No API Enrichment)")
+                flags = self.flagging_system.analyze_reference_extraction(
+                    original_parsed=parsed_ref.copy(),
+                    final_result=parsed_ref,
+                    api_enrichment_data=None,
+                    doi_metadata=doi_metadata,
+                    conflict_analysis=conflict_analysis
+                )
+                
+                # Add flagging information to the result
+                parsed_ref["flagging_analysis"] = self.flagging_system.format_flags_for_api(flags)
                 
                 return parsed_ref
                 

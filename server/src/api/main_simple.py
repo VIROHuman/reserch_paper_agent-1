@@ -194,7 +194,10 @@ async def upload_and_process_pdf(
                             "final_quality_score": parsed_ref.get("final_quality_score", 0)
                         },
                         "missing_fields": parsed_ref.get("missing_fields", []),
-                        "tagged_output": tagged_output
+                        "tagged_output": tagged_output,
+                        "flagging_analysis": parsed_ref.get("flagging_analysis", {}),
+                        "comparison_analysis": parsed_ref.get("conflict_analysis", {}),
+                        "doi_metadata": parsed_ref.get("doi_metadata", {})
                     })
                 except Exception as e:
                     processing_results.append({
@@ -288,7 +291,10 @@ async def parse_single_reference(
                     "final_quality_score": parsed_ref.get("final_quality_score", 0)
                 },
                 "missing_fields": parsed_ref.get("missing_fields", []),
-                "tagged_output": tagged_output
+                "tagged_output": tagged_output,
+                "flagging_analysis": parsed_ref.get("flagging_analysis", {}),
+                "comparison_analysis": parsed_ref.get("conflict_analysis", {}),
+                "doi_metadata": parsed_ref.get("doi_metadata", {})
             }
         )
         
@@ -350,7 +356,10 @@ async def debug_parse_reference(
                     "final_quality_score": parsed_ref.get("final_quality_score", 0)
                 },
                 "missing_fields": parsed_ref.get("missing_fields", []),
-                "tagged_output": tagged_output
+                "tagged_output": tagged_output,
+                "flagging_analysis": parsed_ref.get("flagging_analysis", {}),
+                "comparison_analysis": parsed_ref.get("conflict_analysis", {}),
+                "doi_metadata": parsed_ref.get("doi_metadata", {})
             }
         )
         

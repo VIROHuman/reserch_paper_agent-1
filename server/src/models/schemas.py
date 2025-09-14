@@ -83,6 +83,47 @@ class PDFProcessingResponse(BaseModel):
     processing_results: List[Dict[str, Any]]
 
 
+class FieldAnalysis(BaseModel):
+    """Analysis of a specific field"""
+    value: Optional[Any] = None
+    source: str
+    confidence: float
+    status: str
+    original_value: Optional[Any] = None
+    replacement_reason: Optional[str] = None
+    conflict_details: Optional[Dict[str, Any]] = None
+
+
+class FlaggingSummary(BaseModel):
+    """Summary of flagging information"""
+    missing_fields: List[str] = []
+    replaced_fields: List[str] = []
+    conflicted_fields: List[str] = []
+    partial_fields: List[str] = []
+    data_sources_used: List[str] = []
+
+
+class FlaggingAnalysis(BaseModel):
+    """Comprehensive flagging analysis"""
+    extraction_status: str
+    overall_confidence: float
+    quality_score: float
+    field_analysis: Dict[str, FieldAnalysis] = {}
+    summary: FlaggingSummary
+    processing_notes: List[str] = []
+    recovery_suggestions: List[str] = []
+
+
+class ComparisonAnalysis(BaseModel):
+    """Detailed comparison between online and LLM data"""
+    has_conflicts: bool = False
+    conflicts: List[Dict[str, Any]] = []
+    field_comparisons: Dict[str, Dict[str, Any]] = {}
+    similarity_scores: Dict[str, float] = {}
+    confidence_scores: Dict[str, float] = {}
+    resolution_strategy: str = "online_preferred"
+
+
 class APIResponse(BaseModel):
     """Generic API response"""
     success: bool

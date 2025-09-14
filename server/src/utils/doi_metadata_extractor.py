@@ -325,35 +325,72 @@ class DOIMetadataExtractor:
 
 
 class DOIMetadataConflictDetector:
-    """Detect conflicts between online metadata and Ollama-extracted data"""
+    """Enhanced conflict detection between online metadata and LLM-extracted data"""
     
-    @staticmethod
-    def detect_conflicts(online_metadata: Dict[str, Any], ollama_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Detect conflicts between online and Ollama data"""
+    def __init__(self):
+        # Field comparison weights for conflict resolution
+        self.field_weights = {
+            "title": 0.30,
+            "authors": 0.25,
+            "year": 0.20,
+            "journal": 0.15,
+            "doi": 0.10
+        }
+        
+        # Minimum similarity thresholds for field matching
+        self.similarity_thresholds = {
+            "title": 0.7,
+            "journal": 0.6,
+            "authors": 0.5
+        }
+        
+        logger.info("✅ Enhanced DOI Metadata Conflict Detector initialized")
+    
+    def detect_conflicts(self, online_metadata: Dict[str, Any], ollama_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Enhanced conflict detection with detailed comparison analysis"""
         conflicts = {
             "has_conflicts": False,
             "conflicts": [],
             "preferred_data": {},
-            "confidence_scores": {}
+            "confidence_scores": {},
+            "field_comparisons": {},
+            "similarity_scores": {},
+            "resolution_strategy": "online_preferred"
         }
         
-        # Check title conflicts
-        online_title = online_metadata.get("title", "").lower().strip() if online_metadata.get("title") else ""
-        ollama_title = ollama_data.get("title", "").lower().strip() if ollama_data.get("title") else ""
+        # Enhanced field-by-field comparison
+        fields_to_compare = ["title", "year", "journal", "authors", "doi"]
         
-        if online_title and ollama_title and online_title != ollama_title:
-            conflicts["has_conflicts"] = True
-            conflicts["conflicts"].append({
-                "field": "title",
-                "online_value": online_metadata.get("title"),
-                "ollama_value": ollama_data.get("title"),
-                "preferred": "online"
-            })
-            conflicts["preferred_data"]["title"] = online_metadata.get("title")
-        elif online_title:
-            conflicts["preferred_data"]["title"] = online_metadata.get("title")
-        elif ollama_title:
-            conflicts["preferred_data"]["title"] = ollama_data.get("title")
+        for field in fields_to_compare:
+            field_comparison = self._compare_field(
+                field, 
+                online_metadata.get(field), 
+                ollama_data.get(field)
+            )
+            
+            conflicts["field_comparisons"][field] = field_comparison
+            conflicts["similarity_scores"][field] = field_comparison["similarity"]
+            
+            # Determine preferred value
+            if field_comparison["has_conflict"]:
+                conflicts["has_conflicts"] = True
+                conflicts["conflicts"].append({
+                    "field": field,
+                    "online_value": field_comparison["online_value"],
+                    "ollama_value": field_comparison["ollama_value"],
+                    "preferred": field_comparison["preferred"],
+                    "confidence": field_comparison["confidence"],
+                    "similarity": field_comparison["similarity"],
+                    "conflict_reason": field_comparison["conflict_reason"]
+                })
+                conflicts["preferred_data"][field] = field_comparison["preferred_value"]
+            else:
+                conflicts["preferred_data"][field] = field_comparison["preferred_value"]
+        
+        # Calculate overall confidence scores
+        conflicts["confidence_scores"] = self._calculate_confidence_scores(
+            online_metadata, ollama_data, conflicts["field_comparisons"]
+        )
         
         # Check year conflicts
         online_year = online_metadata.get("year")
@@ -428,3 +465,280 @@ class DOIMetadataConflictDetector:
         }
         
         return conflicts
+    
+    def _compare_field(self, field: str, online_value: Any, ollama_value: Any) -> Dict[str, Any]:
+        """Compare a specific field between online and Ollama data"""
+        comparison = {
+            "field": field,
+            "online_value": online_value,
+            "ollama_value": ollama_value,
+            "has_conflict": False,
+            "preferred": "none",
+            "preferred_value": None,
+            "confidence": 0.0,
+            "similarity": 0.0,
+            "conflict_reason": None
+        }
+        
+        if field == "title":
+            return self._compare_title_field(online_value, ollama_value, comparison)
+        elif field == "year":
+            return self._compare_year_field(online_value, ollama_value, comparison)
+        elif field == "journal":
+            return self._compare_journal_field(online_value, ollama_value, comparison)
+        elif field == "authors":
+            return self._compare_authors_field(online_value, ollama_value, comparison)
+        elif field == "doi":
+            return self._compare_doi_field(online_value, ollama_value, comparison)
+        
+        return comparison
+    
+    def _compare_title_field(self, online_title: str, ollama_title: str, comparison: Dict[str, Any]) -> Dict[str, Any]:
+        """Compare title fields with enhanced similarity analysis"""
+        if not online_title and not ollama_title:
+            comparison["preferred_value"] = None
+            return comparison
+        
+        if not online_title:
+            comparison["preferred_value"] = ollama_title
+            comparison["preferred"] = "ollama"
+            comparison["confidence"] = 0.7
+            return comparison
+        
+        if not ollama_title:
+            comparison["preferred_value"] = online_title
+            comparison["preferred"] = "online"
+            comparison["confidence"] = 0.9
+            return comparison
+        
+        # Calculate similarity
+        similarity = self._calculate_text_similarity(online_title, ollama_title)
+        comparison["similarity"] = similarity
+        
+        if similarity < self.similarity_thresholds["title"]:
+            comparison["has_conflict"] = True
+            comparison["conflict_reason"] = f"Title similarity too low ({similarity:.2f})"
+            
+            # Prefer online data for titles (more authoritative)
+            comparison["preferred"] = "online"
+            comparison["preferred_value"] = online_title
+            comparison["confidence"] = 0.9
+        else:
+            # High similarity - prefer online data
+            comparison["preferred"] = "online"
+            comparison["preferred_value"] = online_title
+            comparison["confidence"] = 0.95
+        
+        return comparison
+    
+    def _compare_year_field(self, online_year: Any, ollama_year: Any, comparison: Dict[str, Any]) -> Dict[str, Any]:
+        """Compare year fields"""
+        if not online_year and not ollama_year:
+            comparison["preferred_value"] = None
+            return comparison
+        
+        if not online_year:
+            comparison["preferred_value"] = ollama_year
+            comparison["preferred"] = "ollama"
+            comparison["confidence"] = 0.7
+            return comparison
+        
+        if not ollama_year:
+            comparison["preferred_value"] = online_year
+            comparison["preferred"] = "online"
+            comparison["confidence"] = 0.95
+            return comparison
+        
+        # Convert to strings for comparison
+        online_year_str = str(online_year)
+        ollama_year_str = str(ollama_year)
+        
+        if online_year_str != ollama_year_str:
+            comparison["has_conflict"] = True
+            comparison["conflict_reason"] = f"Year mismatch: {online_year} vs {ollama_year}"
+            
+            # Prefer online data for years (more reliable)
+            comparison["preferred"] = "online"
+            comparison["preferred_value"] = online_year
+            comparison["confidence"] = 0.95
+        else:
+            comparison["preferred"] = "online"
+            comparison["preferred_value"] = online_year
+            comparison["confidence"] = 0.98
+        
+        return comparison
+    
+    def _compare_journal_field(self, online_journal: str, ollama_journal: str, comparison: Dict[str, Any]) -> Dict[str, Any]:
+        """Compare journal fields with similarity analysis"""
+        if not online_journal and not ollama_journal:
+            comparison["preferred_value"] = None
+            return comparison
+        
+        if not online_journal:
+            comparison["preferred_value"] = ollama_journal
+            comparison["preferred"] = "ollama"
+            comparison["confidence"] = 0.7
+            return comparison
+        
+        if not ollama_journal:
+            comparison["preferred_value"] = online_journal
+            comparison["preferred"] = "online"
+            comparison["confidence"] = 0.9
+            return comparison
+        
+        # Calculate similarity
+        similarity = self._calculate_text_similarity(online_journal, ollama_journal)
+        comparison["similarity"] = similarity
+        
+        if similarity < self.similarity_thresholds["journal"]:
+            comparison["has_conflict"] = True
+            comparison["conflict_reason"] = f"Journal similarity too low ({similarity:.2f})"
+            
+            # Prefer online data for journals
+            comparison["preferred"] = "online"
+            comparison["preferred_value"] = online_journal
+            comparison["confidence"] = 0.9
+        else:
+            comparison["preferred"] = "online"
+            comparison["preferred_value"] = online_journal
+            comparison["confidence"] = 0.95
+        
+        return comparison
+    
+    def _compare_authors_field(self, online_authors: List[str], ollama_authors: List[str], comparison: Dict[str, Any]) -> Dict[str, Any]:
+        """Compare author lists with enhanced analysis"""
+        if not online_authors and not ollama_authors:
+            comparison["preferred_value"] = []
+            return comparison
+        
+        if not online_authors:
+            comparison["preferred_value"] = ollama_authors
+            comparison["preferred"] = "ollama"
+            comparison["confidence"] = 0.7
+            return comparison
+        
+        if not ollama_authors:
+            comparison["preferred_value"] = online_authors
+            comparison["preferred"] = "online"
+            comparison["confidence"] = 0.9
+            return comparison
+        
+        # Calculate author similarity
+        similarity = self._calculate_author_similarity(online_authors, ollama_authors)
+        comparison["similarity"] = similarity
+        
+        if similarity < self.similarity_thresholds["authors"]:
+            comparison["has_conflict"] = True
+            comparison["conflict_reason"] = f"Author similarity too low ({similarity:.2f})"
+            
+            # Prefer online data for authors (more complete)
+            comparison["preferred"] = "online"
+            comparison["preferred_value"] = online_authors
+            comparison["confidence"] = 0.9
+        else:
+            # Prefer online data if it's more complete
+            if len(online_authors) >= len(ollama_authors):
+                comparison["preferred"] = "online"
+                comparison["preferred_value"] = online_authors
+                comparison["confidence"] = 0.95
+            else:
+                comparison["preferred"] = "ollama"
+                comparison["preferred_value"] = ollama_authors
+                comparison["confidence"] = 0.85
+        
+        return comparison
+    
+    def _compare_doi_field(self, online_doi: str, ollama_doi: str, comparison: Dict[str, Any]) -> Dict[str, Any]:
+        """Compare DOI fields"""
+        if not online_doi and not ollama_doi:
+            comparison["preferred_value"] = None
+            return comparison
+        
+        if not online_doi:
+            comparison["preferred_value"] = ollama_doi
+            comparison["preferred"] = "ollama"
+            comparison["confidence"] = 0.7
+            return comparison
+        
+        if not ollama_doi:
+            comparison["preferred_value"] = online_doi
+            comparison["preferred"] = "online"
+            comparison["confidence"] = 0.98
+            return comparison
+        
+        # Normalize DOIs for comparison
+        online_doi_norm = online_doi.lower().strip()
+        ollama_doi_norm = ollama_doi.lower().strip()
+        
+        if online_doi_norm != ollama_doi_norm:
+            comparison["has_conflict"] = True
+            comparison["conflict_reason"] = f"DOI mismatch: {online_doi} vs {ollama_doi}"
+            
+            # Prefer online DOI (more reliable)
+            comparison["preferred"] = "online"
+            comparison["preferred_value"] = online_doi
+            comparison["confidence"] = 0.98
+        else:
+            comparison["preferred"] = "online"
+            comparison["preferred_value"] = online_doi
+            comparison["confidence"] = 0.99
+        
+        return comparison
+    
+    def _calculate_text_similarity(self, text1: str, text2: str) -> float:
+        """Calculate text similarity using Jaccard similarity"""
+        if not text1 or not text2:
+            return 0.0
+        
+        # Normalize text
+        text1_norm = text1.lower().strip()
+        text2_norm = text2.lower().strip()
+        
+        if text1_norm == text2_norm:
+            return 1.0
+        
+        # Word-based similarity
+        words1 = set(text1_norm.split())
+        words2 = set(text2_norm.split())
+        
+        if not words1 or not words2:
+            return 0.0
+        
+        intersection = len(words1 & words2)
+        union = len(words1 | words2)
+        
+        return intersection / union if union > 0 else 0.0
+    
+    def _calculate_author_similarity(self, authors1: List[str], authors2: List[str]) -> float:
+        """Calculate similarity between author lists"""
+        if not authors1 or not authors2:
+            return 0.0
+        
+        # Normalize author names
+        authors1_norm = [author.lower().strip() for author in authors1]
+        authors2_norm = [author.lower().strip() for author in authors2]
+        
+        # Calculate overlap
+        set1 = set(authors1_norm)
+        set2 = set(authors2_norm)
+        
+        if not set1 or not set2:
+            return 0.0
+        
+        intersection = len(set1 & set2)
+        union = len(set1 | set2)
+        
+        return intersection / union if union > 0 else 0.0
+    
+    def _calculate_confidence_scores(
+        self, 
+        online_metadata: Dict[str, Any], 
+        ollama_data: Dict[str, Any],
+        field_comparisons: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, float]:
+        """Calculate confidence scores for each data source"""
+        return {
+            "online_confidence": 0.9 if online_metadata.get("source_api") else 0.0,
+            "ollama_confidence": 0.75 if ollama_data.get("title") else 0.0,
+            "overall_confidence": sum(comp.get("confidence", 0) for comp in field_comparisons.values()) / len(field_comparisons) if field_comparisons else 0.0
+        }

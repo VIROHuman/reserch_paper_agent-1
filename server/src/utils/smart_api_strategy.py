@@ -41,13 +41,11 @@ class SmartAPIStrategy:
     """Smart API strategy with priority ordering and early exit"""
     
     def __init__(self):
-        # Initialize API clients
         self.crossref_client = CrossRefClient()
         self.openalex_client = OpenAlexClient()
         self.semantic_client = SemanticScholarClient()
         self.doaj_client = DOAJClient()
         
-        # API priority order (most reliable first)
         self.api_priority = [
             APIProvider.CROSSREF,
             APIProvider.OPENALEX,
@@ -55,12 +53,11 @@ class SmartAPIStrategy:
             APIProvider.DOAJ
         ]
         
-        # Quality thresholds
         self.min_quality_score = 0.7
         self.min_confidence = 0.6
-        self.max_api_calls = 3  # Stop after 3 successful API calls
+        self.max_api_calls = 3
         
-        logger.info("✅ Smart API Strategy initialized")
+        logger.info("Smart API Strategy initialized")
     
     async def enrich_reference_smart(
         self, 
@@ -68,87 +65,53 @@ class SmartAPIStrategy:
         original_text: str,
         force_enrichment: bool = True
     ) -> Dict[str, Any]:
-        """Smart enrichment with priority ordering and early exit"""
-        logger.info(f"🧠 SMART API ENRICHMENT START")
-        logger.info(f"📝 Input: {original_text[:100]}...")
-        logger.info(f"🔍 Force enrichment: {force_enrichment}")
-        
         enriched_ref = parsed_ref.copy()
         enrichment_sources = []
         api_results = []
         
-        # Create search query
         search_query = self._create_optimized_search_query(parsed_ref, original_text)
         if not search_query:
-            logger.warning("❌ No search query could be created")
             return enriched_ref
         
-        logger.info(f"🔍 Optimized search query: '{search_query}'")
-        
-        # Calculate initial data quality
         initial_quality = self._calculate_data_quality(parsed_ref)
-        logger.info(f"📊 Initial data quality: {initial_quality.overall_confidence:.2f}")
-        
-        # Determine if we need enrichment
         needs_enrichment = self._needs_enrichment(parsed_ref, initial_quality, force_enrichment)
         author_analysis = self._analyze_authors(parsed_ref)
         
-        # Log author analysis
-        logger.info(f"👥 Author Analysis:")
-        logger.info(f"  Has authors: {author_analysis['has_authors']}")
-        logger.info(f"  Author count: {author_analysis['author_count']}")
-        logger.info(f"  Completeness: {author_analysis['completeness_ratio']:.2f}")
-        logger.info(f"  Quality score: {author_analysis['quality_score']:.2f}")
-        if author_analysis['issues']:
-            logger.info(f"  Issues: {author_analysis['issues']}")
-        
         if not needs_enrichment:
-            logger.info("⏭️  No enrichment needed - data quality is sufficient")
+            enriched_ref["api_enrichment_used"] = False
+            enriched_ref["enrichment_sources"] = []
+            enriched_ref["quality_improvement"] = 0.0
+            enriched_ref["final_quality_score"] = initial_quality.overall_confidence
+            enriched_ref["author_analysis"] = author_analysis
             return enriched_ref
         
-        # Try APIs in priority order with early exit
         for i, provider in enumerate(self.api_priority):
             if len(api_results) >= self.max_api_calls:
-                logger.info(f"🛑 Reached max API calls limit ({self.max_api_calls})")
                 break
-            
-            logger.info(f"🔍 Trying {provider.value} (priority {i+1})")
             
             try:
                 result = await self._call_api_with_timeout(provider, search_query, parsed_ref)
                 if result:
                     api_results.append(result)
-                    logger.info(f"✅ {provider.value}: Quality {result.quality_score:.2f}, Confidence {result.confidence:.2f}")
-                    
-                    # Merge the result
                     enriched_ref = self._merge_api_result(enriched_ref, result)
                     enrichment_sources.append(provider.value)
                     
-                    # Check if we have sufficient data quality now
                     current_quality = self._calculate_data_quality(enriched_ref)
                     if current_quality.overall_confidence >= self.min_confidence:
-                        logger.info(f"🎯 Sufficient data quality reached: {current_quality.overall_confidence:.2f}")
                         break
-                else:
-                    logger.info(f"⚠️  {provider.value}: No results or failed")
                     
             except Exception as e:
-                logger.warning(f"❌ {provider.value}: Error - {e}")
+                logger.warning(f"{provider.value} API error: {e}")
                 continue
         
-        # Final quality assessment
         final_quality = self._calculate_data_quality(enriched_ref)
         final_author_analysis = self._analyze_authors(enriched_ref)
         
+        enriched_ref["api_enrichment_used"] = len(enrichment_sources) > 0
         enriched_ref["enrichment_sources"] = enrichment_sources
         enriched_ref["quality_improvement"] = final_quality.overall_confidence - initial_quality.overall_confidence
         enriched_ref["final_quality_score"] = final_quality.overall_confidence
         enriched_ref["author_analysis"] = final_author_analysis
-        
-        logger.info(f"✅ Smart enrichment completed")
-        logger.info(f"  Sources used: {enrichment_sources}")
-        logger.info(f"  Quality improvement: {enriched_ref['quality_improvement']:.2f}")
-        logger.info(f"  Final quality: {final_quality.overall_confidence:.2f}")
         
         return enriched_ref
     
@@ -179,39 +142,31 @@ class SmartAPIStrategy:
         # Return the best strategy (first one that exists)
         for strategy in query_strategies:
             if strategy and len(strategy.strip()) > 5:
-                logger.info(f"🔍 Using query strategy: '{strategy[:100]}...'")
+                logger.info(f"Using query strategy: '{strategy[:100]}...'")
                 return strategy.strip()
         
         return None
     
     def _calculate_data_quality(self, parsed_ref: Dict[str, Any]) -> QualityMetrics:
         """Calculate comprehensive data quality metrics"""
-        # Title quality
         title_quality = 1.0 if parsed_ref.get("title") and len(parsed_ref["title"]) > 10 else 0.0
         
-        # Author quality - enhanced analysis
         author_quality = 0.0
         author_analysis = self._analyze_authors(parsed_ref)
         
         if author_analysis["has_authors"]:
-            # Score based on completeness and quality
             completeness_score = author_analysis["completeness_ratio"]
             quality_score = author_analysis["quality_score"]
             author_quality = (completeness_score + quality_score) / 2.0
         
-        # Year quality
         year_quality = 1.0 if parsed_ref.get("year") and str(parsed_ref["year"]).isdigit() else 0.0
         
-        # Journal quality
         journal_quality = 1.0 if parsed_ref.get("journal") and len(parsed_ref["journal"]) > 5 else 0.0
         
-        # DOI quality
         doi_quality = 1.0 if parsed_ref.get("doi") else 0.0
         
-        # Pages quality
         pages_quality = 1.0 if parsed_ref.get("pages") else 0.0
         
-        # Calculate overall confidence
         weights = {
             "title": 0.25,
             "authors": 0.25,
@@ -244,17 +199,15 @@ class SmartAPIStrategy:
         if force_enrichment:
             return True
         
-        # Check for missing critical fields
         critical_fields = ["title", "family_names", "year"]
         missing_critical = [field for field in critical_fields if not parsed_ref.get(field)]
         
         if missing_critical:
-            logger.info(f"🔍 Missing critical fields: {missing_critical}")
+            logger.info(f"Missing critical fields: {missing_critical}")
             return True
         
-        # Check quality threshold
         if quality.overall_confidence < self.min_confidence:
-            logger.info(f"🔍 Quality below threshold: {quality.overall_confidence:.2f} < {self.min_confidence}")
+            logger.info(f"Quality below threshold: {quality.overall_confidence:.2f} < {self.min_confidence}")
             return True
         
         return False
@@ -278,7 +231,6 @@ class SmartAPIStrategy:
             analysis["issues"].append("No authors found")
             return analysis
         
-        # Check completeness (family names vs given names)
         if given_names:
             analysis["completeness_ratio"] = min(len(given_names) / len(family_names), 1.0)
             analysis["missing_given_names"] = max(0, len(family_names) - len(given_names))
@@ -287,15 +239,12 @@ class SmartAPIStrategy:
             analysis["missing_given_names"] = len(family_names)
             analysis["issues"].append("No given names found")
         
-        # Check quality of author names
         quality_issues = 0
         for i, (family, given) in enumerate(zip(family_names, given_names or [])):
-            # Check if family name is meaningful
             if not family or len(family.strip()) < 2:
                 quality_issues += 1
                 analysis["issues"].append(f"Author {i+1}: Invalid family name '{family}'")
             
-            # Check if given name is meaningful (if present)
             if given and len(given.strip()) < 1:
                 quality_issues += 1
                 analysis["issues"].append(f"Author {i+1}: Invalid given name '{given}'")
@@ -371,7 +320,7 @@ class SmartAPIStrategy:
             logger.warning(f"⏰ {provider.value}: Timeout after 8s")
             return None
         except Exception as e:
-            logger.warning(f"❌ {provider.value}: Error - {e}")
+            logger.warning(f" {provider.value}: Error - {e}")
             return None
     
     def _find_best_match_smart(self, parsed_ref: Dict[str, Any], api_results: List[Any]) -> Optional[Any]:
@@ -420,7 +369,7 @@ class SmartAPIStrategy:
                 best_score = total_score
                 best_match = result
         
-        logger.info(f"🔍 Best match score: {best_score:.2f}")
+        logger.info(f"Best match score: {best_score:.2f}")
         return best_match if best_score > 0.3 else api_results[0]  # Fallback to first result
     
     def _calculate_match_quality(self, original: Dict[str, Any], api_data: Dict[str, Any]) -> float:
@@ -532,14 +481,14 @@ class SmartAPIStrategy:
                     # Fill missing field
                     merged[field] = api_value
                     merged_fields.append(field)
-                    logger.info(f"  ✅ Filled missing {field}: '{api_value}'")
+                    logger.info(f"Filled missing {field}: '{api_value}'")
                 elif self._is_better_value(original_value, api_value, field):
                     # Replace with better value
                     merged[field] = api_value
                     merged_fields.append(field)
-                    logger.info(f"  🔄 Improved {field}: '{original_value}' → '{api_value}'")
+                    logger.info(f"Improved {field}: '{original_value}' → '{api_value}'")
                 else:
-                    logger.info(f"  ⏭️  Kept original {field}: '{original_value}'")
+                    logger.info(f"Kept original {field}: '{original_value}'")
         
         # Handle authors specially - enhanced logic
         api_family_names = api_result.data.get("family_names", [])
@@ -554,7 +503,7 @@ class SmartAPIStrategy:
                 merged["family_names"] = api_family_names
                 merged["given_names"] = api_given_names
                 merged_fields.append("authors")
-                logger.info(f"  ✅ Added authors: {api_family_names}")
+                logger.info(f"Added authors: {api_family_names}")
             else:
                 # Check if API authors are better/more complete
                 original_analysis = self._analyze_authors(merged)
@@ -567,17 +516,17 @@ class SmartAPIStrategy:
                     merged["family_names"] = api_family_names
                     merged["given_names"] = api_given_names
                     merged_fields.append("authors")
-                    logger.info(f"  🔄 Improved authors: {original_family} → {api_family_names}")
+                    logger.info(f" Improved authors: {original_family} → {api_family_names}")
                 elif len(api_family_names) > len(original_family):
                     # API has more authors
                     merged["family_names"] = api_family_names
                     merged["given_names"] = api_given_names
                     merged_fields.append("authors")
-                    logger.info(f"  ➕ Added more authors: {len(original_family)} → {len(api_family_names)}")
+                    logger.info(f"Added more authors: {len(original_family)} → {len(api_family_names)}")
                 else:
-                    logger.info(f"  ⏭️  Kept original authors: {original_family}")
+                    logger.info(f"Kept original authors: {original_family}")
         
-        logger.info(f"🔄 Merged {len(merged_fields)} fields: {merged_fields}")
+        logger.info(f"Merged {len(merged_fields)} fields: {merged_fields}")
         return merged
     
     def _is_better_value(self, original: Any, api_value: Any, field: str) -> bool:

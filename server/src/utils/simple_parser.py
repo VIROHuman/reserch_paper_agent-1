@@ -10,7 +10,7 @@ class SimpleReferenceParser:
     """Simple but powerful reference parser using regex patterns"""
     
     def __init__(self):
-        logger.info("✅ Simple reference parser initialized")
+        logger.info("Simple reference parser initialized")
     
     def parse_reference(self, ref_text: str) -> Dict[str, Any]:
         """Parse reference text and extract key fields"""

@@ -17,15 +17,12 @@ class OllamaReferenceParser:
         self._initialize_client()
     
     def _initialize_client(self):
-        """Initialize Ollama client"""
         try:
-            # Test if Ollama is running and model is available
             models_response = ollama.list()
             available_models = [model.model for model in models_response.models]
             
             if self.model_name not in available_models:
                 logger.warning(f"Model {self.model_name} not found. Available models: {available_models}")
-                # Try to use any available gemma model
                 gemma_models = [model for model in available_models if 'gemma' in model.lower()]
                 if gemma_models:
                     self.model_name = gemma_models[0]
@@ -35,29 +32,20 @@ class OllamaReferenceParser:
                     return
             
             self.client = ollama
-            logger.info(f"✅ Ollama client initialized with model: {self.model_name}")
+            logger.info(f"Ollama client initialized with model: {self.model_name}")
             
         except Exception as e:
             logger.error(f"Failed to initialize Ollama client: {e}")
             self.client = None
     
     def parse_reference(self, ref_text: str) -> Dict[str, Any]:
-        """Parse reference text using Ollama Gemma model"""
-        logger.info(f"🤖 OLLAMA PARSING START")
-        logger.info(f"📝 Input text: {ref_text[:100]}{'...' if len(ref_text) > 100 else ''}")
-        
         if not self.client:
-            logger.error("❌ Ollama client not initialized")
+            logger.error("Ollama client not initialized")
             return self._get_empty_result()
         
         try:
-            # Create a structured prompt for the model
             prompt = self._create_parsing_prompt(ref_text)
-            logger.info(f"🤖 Ollama prompt created (length: {len(prompt)} chars)")
-            logger.info(f"📋 Ollama prompt preview: {prompt[:200]}...")
             
-            # Call the model
-            logger.info(f"🚀 Calling Ollama model: {self.model_name}")
             response = self.client.chat(
                 model=self.model_name,
                 messages=[
@@ -67,76 +55,67 @@ class OllamaReferenceParser:
                     }
                 ],
                 options={
-                    'temperature': 0.1,  # Low temperature for consistent parsing
+                    'temperature': 0.1,
                     'top_p': 0.9
                 }
             )
             
-            # Extract the JSON response
             model_output = response['message']['content']
-            logger.info(f"📊 Ollama raw response: {model_output}")
-            
-            # Parse the JSON response
             parsed_result = self._parse_model_response(model_output)
-            logger.info(f"📋 Ollama parsed result: {parsed_result}")
-            
-            # Validate and clean the result
             validated_result = self._validate_and_clean_result(parsed_result)
-            logger.info(f"✅ Ollama final result: {validated_result}")
             
             return validated_result
             
         except Exception as e:
-            logger.error(f"❌ Error parsing reference with Ollama: {e}")
+            logger.error(f"Error parsing reference with Ollama: {e}")
             return self._get_empty_result()
     
     def _create_parsing_prompt(self, ref_text: str) -> str:
         """Create a structured prompt for reference parsing"""
         prompt = f"""
-You are a reference parsing expert. Parse the following academic reference and extract the specified fields in JSON format.
+            You are a reference parsing expert. Parse the following academic reference and extract the specified fields in JSON format.
 
-Reference: "{ref_text}"
+            Reference: "{ref_text}"
 
-Extract the following fields and return ONLY a valid JSON object:
-{{
-    "family_names": ["list of author surnames"],
-    "given_names": ["list of author given names"],
-    "year": "publication year",
-    "title": "article/chapter title",
-    "journal": "journal/conference name",
-    "doi": "DOI or arXiv ID if present",
-    "pages": "page numbers if present"
-}}
+            Extract the following fields and return ONLY a valid JSON object:
+            {{
+                "family_names": ["list of author surnames"],
+                "given_names": ["list of author given names"],
+                "year": "publication year",
+                "title": "article/chapter title",
+                "journal": "journal/conference name",
+                "doi": "DOI or arXiv ID if present",
+                "pages": "page numbers if present"
+            }}
 
-Rules:
-1. Extract ALL authors, not just the first one
-2. For family_names and given_names, maintain the same order as they appear in the reference
-3. If multiple authors, return arrays with corresponding entries
-4. Extract the full title, including quotes if present
-5. For journal, extract the publication venue name
-6. For DOI, include full DOI or arXiv ID
-7. For pages, extract page range (e.g., "5-7" or "123-130")
-8. If a field is not present, use null
-9. Return ONLY the JSON object, no additional text
+            Rules:
+            1. Extract ALL authors, not just the first one
+            2. For family_names and given_names, maintain the same order as they appear in the reference
+            3. If multiple authors, return arrays with corresponding entries
+            4. Extract the full title, including quotes if present
+            5. For journal, extract the publication venue name
+            6. For DOI, include full DOI or arXiv ID
+            7. For pages, extract page range (e.g., "5-7" or "123-130")
+            8. If a field is not present, use null
+            9. Return ONLY the JSON object, no additional text
 
-Example output:
-{{
-    "family_names": ["Smith", "Jones"],
-    "given_names": ["J", "M"],
-    "year": "2023",
-    "title": "Machine Learning in Healthcare",
-    "journal": "Nature Medicine",
-    "doi": "10.1038/s41591-023-02456-7",
-    "pages": "123-130"
-}}
-"""
+            Example output:
+            {{
+                "family_names": ["Smith", "Jones"],
+                "given_names": ["J", "M"],
+                "year": "2023",
+                "title": "Machine Learning in Healthcare",
+                "journal": "Nature Medicine",
+                "doi": "10.1038/s41591-023-02456-7",
+                "pages": "123-130"
+            }}
+        """
         return prompt
     
     def _parse_model_response(self, model_output: str) -> Dict[str, Any]:
         """Parse the model's JSON response"""
         try:
-            # Try to extract JSON from the response
-            # Remove any markdown formatting
+
             cleaned_output = model_output.strip()
             if cleaned_output.startswith('```json'):
                 cleaned_output = cleaned_output[7:]
@@ -144,7 +123,6 @@ Example output:
                 cleaned_output = cleaned_output[:-3]
             cleaned_output = cleaned_output.strip()
             
-            # Parse JSON
             result = json.loads(cleaned_output)
             return result
             

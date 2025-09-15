@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""
-Run the Simplified Research Paper Reference Agent API server
-"""
 import uvicorn
 from server.src.api.main_simple import app
 

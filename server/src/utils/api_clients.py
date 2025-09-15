@@ -1,6 +1,3 @@
-"""
-API clients for various academic databases
-"""
 import httpx
 import asyncio
 from typing import List, Dict, Any, Optional
@@ -11,7 +8,6 @@ from ..models.schemas import CrossRefResponse, OpenAlexResponse, SemanticScholar
 
 
 class CrossRefClient:
-    """Client for CrossRef API"""
     
     def __init__(self):
         self.base_url = settings.crossref_base_url
@@ -23,7 +19,6 @@ class CrossRefClient:
             self.headers["Authorization"] = f"Bearer {settings.crossref_api_key}"
     
     async def search_reference(self, query: str, limit: int = 5) -> List[ReferenceData]:
-        """Search for reference using CrossRef API"""
         logger.info(f"🔍 CROSSREF SEARCH: '{query}' (limit: {limit})")
         try:
             async with httpx.AsyncClient() as client:

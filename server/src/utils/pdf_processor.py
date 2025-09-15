@@ -1,6 +1,3 @@
-"""
-PDF processing utilities for academic paper reference extraction
-"""
 import pdfplumber
 import fitz  # PyMuPDF
 import re
@@ -15,7 +12,6 @@ import spacy
 
 
 class PDFReferenceExtractor:
-    """PDF reference extractor using pdfplumber and PyMuPDF"""
     
     def __init__(self):
         self.executor = ThreadPoolExecutor(max_workers=2)
@@ -23,9 +19,7 @@ class PDFReferenceExtractor:
         self._load_spacy_model()
         
     def _load_spacy_model(self):
-        """Load spaCy model for NER and sentence segmentation"""
         try:
-            # Try to load the transformer model first, fallback to small model
             try:
                 self.nlp = spacy.load("en_core_web_trf")
                 logger.info("Loaded spaCy transformer model (en_core_web_trf)")

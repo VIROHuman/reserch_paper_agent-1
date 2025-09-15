@@ -1,6 +1,3 @@
-"""
-Simplified FastAPI application for reference extraction
-"""
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
@@ -16,11 +13,10 @@ from ..utils.word_processor import WordDocumentProcessor
 from ..utils.file_handler import FileHandler
 from ..utils.enhanced_parser import EnhancedReferenceParser
 
-# Configure logging
 logger.remove()
 logger.add(
     sys.stdout,
-    level="DEBUG",  # Set to DEBUG for detailed output
+    level="DEBUG",
     format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
 )
 
@@ -29,12 +25,10 @@ logger.add(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager"""
     global pdf_extractor, word_processor, file_handler, enhanced_parser
     
     logger.info("Starting Enhanced Research Paper Reference Agent API")
     
-    # Initialize utilities
     try:
         logger.info("Initializing utilities...")
         pdf_extractor = PDFReferenceExtractor()

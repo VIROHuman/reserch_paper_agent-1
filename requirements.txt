@@ -1,34 +1,17 @@
-# Core FastAPI dependencies
 fastapi>=0.100.0
 uvicorn[standard]>=0.20.0
 pydantic>=2.0.0,<3.0.0
 python-multipart>=0.0.5
 python-dotenv>=1.0.0
-
-# HTTP clients
 httpx>=0.24.0
 aiohttp>=3.8.0
-
-# Logging
 loguru>=0.7.0
-
-# PDF Processing
 pdfplumber>=0.9.0
 pymupdf>=1.23.0
-tqdm>=4.64.0
-pillow>=9.0.0
-pdf2image>=1.16.0
 aiofiles>=23.0.0
-
-# Word Document Processing
 python-docx>=0.8.11
-
-# Ollama integration
 ollama>=0.1.0
-
-# NLP Processing
 spacy>=3.7.0
-
-# Testing
+grobid-client-python>=0.0.7
 pytest>=7.0.0
 pytest-asyncio>=0.21.0

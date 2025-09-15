@@ -1,31 +1,22 @@
-"""
-File upload and management utilities
-"""
 import aiofiles
 import os
 import uuid
 from pathlib import Path
-from typing import Optional
 from loguru import logger
 from fastapi import UploadFile
 
 
 class FileHandler:
-    """Handle file uploads and cleanup"""
     
     def __init__(self, upload_dir: str = "uploads"):
         self.upload_dir = Path(upload_dir)
         self.upload_dir.mkdir(exist_ok=True)
     
     async def save_uploaded_file(self, file: UploadFile) -> str:
-        """Save uploaded file to temporary directory"""
         try:
-            # Generate unique filename with proper extension
             file_extension = Path(file.filename).suffix if file.filename else ".pdf"
             unique_filename = f"{uuid.uuid4()}{file_extension}"
             file_path = self.upload_dir / unique_filename
-            
-            # Save file
             async with aiofiles.open(file_path, 'wb') as f:
                 content = await file.read()
                 await f.write(content)
@@ -38,7 +29,6 @@ class FileHandler:
             raise
     
     def get_file_type(self, file_path: str) -> str:
-        """Determine file type based on extension"""
         try:
             file_extension = Path(file_path).suffix.lower()
             
@@ -54,12 +44,10 @@ class FileHandler:
             return 'unknown'
     
     def is_supported_file_type(self, file_path: str) -> bool:
-        """Check if file type is supported"""
         file_type = self.get_file_type(file_path)
         return file_type in ['pdf', 'word']
     
     def cleanup_file(self, file_path: str):
-        """Clean up temporary file"""
         try:
             if os.path.exists(file_path):
                 os.remove(file_path)
@@ -68,7 +56,6 @@ class FileHandler:
             logger.warning(f"Error cleaning up file {file_path}: {e}")
     
     def get_file_size(self, file_path: str) -> int:
-        """Get file size in bytes"""
         try:
             return os.path.getsize(file_path)
         except Exception:

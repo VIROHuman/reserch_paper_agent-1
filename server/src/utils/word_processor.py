@@ -1,6 +1,3 @@
-"""
-Word document processing utilities for academic paper reference extraction
-"""
 import re
 import os
 from pathlib import Path
@@ -20,7 +17,6 @@ except ImportError:
 
 
 class WordDocumentProcessor:
-    """Word document reference extractor using python-docx"""
     
     def __init__(self):
         self.executor = ThreadPoolExecutor(max_workers=2)
@@ -28,9 +24,7 @@ class WordDocumentProcessor:
         self._load_spacy_model()
         
     def _load_spacy_model(self):
-        """Load spaCy model for NER and sentence segmentation"""
         try:
-            # Try to load the transformer model first, fallback to small model
             try:
                 self.nlp = spacy.load("en_core_web_trf")
                 logger.info("Loaded spaCy transformer model (en_core_web_trf)")
@@ -47,7 +41,6 @@ class WordDocumentProcessor:
         paper_type: str = "auto",
         use_ml: bool = True
     ) -> Dict[str, Any]:
-        """Process Word document and extract references using simplified approach"""
         try:
             if not DOCX_AVAILABLE:
                 raise Exception("python-docx library not available. Please install it with: pip install python-docx")
@@ -82,19 +75,13 @@ class WordDocumentProcessor:
             }
     
     def _extract_references_from_docx(self, doc_path: str) -> List[Dict[str, Any]]:
-        """Extract references from Word document"""
         references = []
         
         try:
-            # Load the document
             doc = Document(doc_path)
-            
-            # Extract all text from the document
             full_text = ""
             for paragraph in doc.paragraphs:
                 full_text += paragraph.text + "\n"
-            
-            # Also extract text from tables
             for table in doc.tables:
                 for row in table.rows:
                     for cell in row.cells:
@@ -102,8 +89,6 @@ class WordDocumentProcessor:
                 full_text += "\n"
             
             logger.info(f"📄 Word document text extracted: {len(full_text)} characters")
-            logger.info(f"📄 First 500 chars: {full_text[:500]}")
-            logger.info(f"📄 Last 500 chars: {full_text[-500:]}")
             
             if full_text:
                 references = self._extract_references_from_text(full_text)
@@ -130,9 +115,6 @@ class WordDocumentProcessor:
         search_start = max(0, int(total_lines * 0.8))  # Start from 80% of document
         logger.info(f"🔍 Searching for references starting from line {search_start} (last 20% of {total_lines} lines)")
         
-        # Debug: Show some lines from the search area
-        debug_lines = lines[search_start:search_start + 10]
-        logger.info(f"🔍 Debug - Lines {search_start}-{search_start + 10}: {debug_lines}")
         
         # Try to find reference section in last 20%
         ref_section_start = self._find_reference_section(lines[search_start:])

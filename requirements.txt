@@ -20,6 +20,9 @@ pillow>=9.0.0
 pdf2image>=1.16.0
 aiofiles>=23.0.0
 
+# Word Document Processing
+python-docx>=0.8.11
+
 # Ollama integration
 ollama>=0.1.0
 

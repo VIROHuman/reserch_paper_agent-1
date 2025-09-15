@@ -12,6 +12,7 @@ from typing import List, Dict, Any, Optional
 from ..config import settings
 from ..models.schemas import APIResponse
 from ..utils.pdf_processor import PDFReferenceExtractor
+from ..utils.word_processor import WordDocumentProcessor
 from ..utils.file_handler import FileHandler
 from ..utils.enhanced_parser import EnhancedReferenceParser
 
@@ -29,7 +30,7 @@ logger.add(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
-    global pdf_extractor, file_handler, enhanced_parser
+    global pdf_extractor, word_processor, file_handler, enhanced_parser
     
     logger.info("Starting Enhanced Research Paper Reference Agent API")
     
@@ -37,6 +38,7 @@ async def lifespan(app: FastAPI):
     try:
         logger.info("Initializing utilities...")
         pdf_extractor = PDFReferenceExtractor()
+        word_processor = WordDocumentProcessor()
         file_handler = FileHandler()
         enhanced_parser = EnhancedReferenceParser()
         logger.info("Utilities initialized successfully")
@@ -75,7 +77,8 @@ async def root():
         message="Simplified Research Paper Reference Agent API is running",
         data={
             "version": "1.0.0",
-            "endpoints": ["/upload-pdf", "/parse-reference", "/debug-parse", "/health"]
+            "endpoints": ["/upload-pdf", "/parse-reference", "/debug-parse", "/health"],
+            "supported_file_types": ["pdf", "docx", "doc"]
         }
     )
 
@@ -88,7 +91,7 @@ async def health_check():
         message="API is healthy",
         data={
             "status": "healthy",
-            "utilities_initialized": pdf_extractor is not None and file_handler is not None and enhanced_parser is not None,
+            "utilities_initialized": pdf_extractor is not None and word_processor is not None and file_handler is not None and enhanced_parser is not None,
             "parsers_available": {
                 "enhanced_parser": enhanced_parser is not None,
                 "simple_parser": enhanced_parser.simple_parser is not None if enhanced_parser else False,
@@ -98,6 +101,10 @@ async def health_check():
                     "openalex": enhanced_parser.openalex_client is not None if enhanced_parser else False,
                     "semantic_scholar": enhanced_parser.semantic_client is not None if enhanced_parser else False,
                     "doaj": enhanced_parser.doaj_client is not None if enhanced_parser else False
+                },
+                "document_processors": {
+                    "pdf_processor": pdf_extractor is not None,
+                    "word_processor": word_processor is not None
                 }
             }
         }
@@ -112,44 +119,72 @@ async def upload_and_process_pdf(
     use_ollama: bool = Form(True),
     enable_api_enrichment: bool = Form(True)
 ):
-    """Upload PDF and extract/process references with enhanced parsing and API enrichment"""
+    """Upload PDF or Word document and extract/process references with enhanced parsing and API enrichment"""
     try:
-        if not file.filename.lower().endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+        # Check if file type is supported
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
         
-        if not pdf_extractor or not file_handler or not enhanced_parser:
-            raise HTTPException(status_code=500, detail="PDF processing utilities not initialized")
+        file_extension = file.filename.lower().split('.')[-1]
+        if file_extension not in ['pdf', 'docx', 'doc']:
+            raise HTTPException(status_code=400, detail="Only PDF and Word document files are allowed (.pdf, .docx, .doc)")
+        
+        if not file_handler or not enhanced_parser:
+            raise HTTPException(status_code=500, detail="Document processing utilities not initialized")
         
         # Save uploaded file
         file_path = await file_handler.save_uploaded_file(file)
         
         try:
-            # Detect paper type if auto
-            if paper_type == "auto":
-                paper_type = pdf_extractor.detect_paper_type(file_path)
+            # Determine file type and process accordingly
+            file_type = file_handler.get_file_type(file_path)
             
-            # Process PDF with simplified extractor
-            pdf_result = await pdf_extractor.process_pdf_with_extraction(
-                file_path, paper_type, use_ml
-            )
-            
-            if not pdf_result["success"]:
-                return APIResponse(
-                    success=False,
-                    message=f"PDF processing failed: {pdf_result['error']}",
-                    data={"file_info": {"filename": file.filename, "size": file.size}}
+            if file_type == 'pdf':
+                if not pdf_extractor:
+                    raise HTTPException(status_code=500, detail="PDF processing utilities not initialized")
+                
+                # Detect paper type if auto
+                if paper_type == "auto":
+                    paper_type = pdf_extractor.detect_paper_type(file_path)
+                
+                # Process PDF with simplified extractor
+                processing_result = await pdf_extractor.process_pdf_with_extraction(
+                    file_path, paper_type, use_ml
+                )
+                
+            elif file_type == 'word':
+                if not word_processor:
+                    raise HTTPException(status_code=500, detail="Word document processing utilities not initialized")
+                
+                # Detect paper type if auto
+                if paper_type == "auto":
+                    paper_type = word_processor.detect_paper_type(file_path)
+                
+                # Process Word document
+                processing_result = await word_processor.process_word_document(
+                    file_path, paper_type, use_ml
                 )
             
-            references = pdf_result["references"]
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_type}")
+            
+            if not processing_result["success"]:
+                return APIResponse(
+                    success=False,
+                    message=f"Document processing failed: {processing_result['error']}",
+                    data={"file_info": {"filename": file.filename, "size": file.size, "type": file_type}}
+                )
+            
+            references = processing_result["references"]
             
             if not references:
                 return APIResponse(
                     success=False,
-                    message="No references found in PDF",
+                    message=f"No references found in {file_type.upper()} document",
                     data={
-                        "file_info": {"filename": file.filename, "size": file.size},
+                        "file_info": {"filename": file.filename, "size": file.size, "type": file_type},
                         "paper_type": paper_type,
-                        "paper_data": pdf_result["paper_data"]
+                        "paper_data": processing_result["paper_data"]
                     }
                 )
             
@@ -158,8 +193,13 @@ async def upload_and_process_pdf(
             
             for i, ref_data in enumerate(references):
                 try:
-                    # Extract raw text from the reference data
-                    ref_text = ref_data.get("raw", "")
+                    # Extract raw text from the reference data (handle both formats)
+                    if isinstance(ref_data, dict) and "raw" in ref_data:
+                        ref_text = ref_data["raw"]
+                    elif isinstance(ref_data, str):
+                        ref_text = ref_data
+                    else:
+                        ref_text = str(ref_data)
                     
                     # Use enhanced parser with API enrichment
                     parsed_ref = await enhanced_parser.parse_reference_enhanced(
@@ -200,9 +240,17 @@ async def upload_and_process_pdf(
                         "doi_metadata": parsed_ref.get("doi_metadata", {})
                     })
                 except Exception as e:
+                    # Handle reference text extraction for error case too
+                    if isinstance(ref_data, dict) and "raw" in ref_data:
+                        ref_text = ref_data["raw"]
+                    elif isinstance(ref_data, str):
+                        ref_text = ref_data
+                    else:
+                        ref_text = str(ref_data)
+                    
                     processing_results.append({
                         "index": i,
-                        "original_text": ref_data.get("raw", ""),
+                        "original_text": ref_text,
                         "parser_used": "error",
                         "api_enrichment_used": False,
                         "error": str(e)
@@ -216,11 +264,12 @@ async def upload_and_process_pdf(
             
             return APIResponse(
                 success=True,
-                message=f"PDF processed successfully. Found {len(references)} references, processed {successful_processing} successfully.",
+                message=f"{file_type.upper()} document processed successfully. Found {len(references)} references, processed {successful_processing} successfully.",
                 data={
                     "file_info": {
                         "filename": file.filename,
                         "size": file.size,
+                        "type": file_type,
                         "references_found": len(references),
                         "successfully_processed": successful_processing
                     },
@@ -241,7 +290,7 @@ async def upload_and_process_pdf(
             file_handler.cleanup_file(file_path)
     
     except Exception as e:
-        logger.error(f"PDF processing error: {str(e)}")
+        logger.error(f"Document processing error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

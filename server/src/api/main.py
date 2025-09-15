@@ -23,6 +23,7 @@ from ..utils.tagging import ReferenceTagger
 from ..utils.api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient
 from ..utils.parallel_api_client import ParallelAPIClient
 from ..utils.appjsonify_integration import PDFReferenceExtractor
+from ..utils.word_processor import WordDocumentProcessor
 from ..utils.file_handler import FileHandler
 
 # GROBID imports
@@ -42,7 +43,7 @@ logger.add(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
-    global validator, enhanced_validator, parser, tagger, pdf_extractor, file_handler, parallel_client, grobid_client
+    global validator, enhanced_validator, parser, tagger, pdf_extractor, word_processor, file_handler, parallel_client, grobid_client
     
     logger.info("Starting Research Paper Reference Agent API")
     
@@ -54,6 +55,7 @@ async def lifespan(app: FastAPI):
         parser = ReferenceParser()
         tagger = ReferenceTagger()
         pdf_extractor = PDFReferenceExtractor()
+        word_processor = WordDocumentProcessor()
         file_handler = FileHandler()
         parallel_client = ParallelAPIClient()
         
@@ -93,6 +95,7 @@ enhanced_validator = None
 parser = None
 tagger = None
 pdf_extractor = None
+word_processor = None
 file_handler = None
 parallel_client = None
 
@@ -114,10 +117,12 @@ async def root():
                 "/process",
                 "/upload-pdf",
                 "/extract-references-only",
+                "/supported-paper-types",
                 "/health",
                 "/apis/status",
                 "/parallel-api-status"
-            ]
+            ],
+            "supported_file_types": ["pdf", "docx", "doc"]
         }
     )
 
@@ -135,7 +140,9 @@ async def health_check():
                 "basic": validator is not None,
                 "enhanced": enhanced_validator is not None,
                 "parser": parser is not None,
-                "tagger": tagger is not None
+                "tagger": tagger is not None,
+                "pdf_processor": pdf_extractor is not None,
+                "word_processor": word_processor is not None
             }
         }
     )
@@ -482,52 +489,89 @@ async def upload_and_process_pdf(
     process_references: bool = Form(True),
     validate_all: bool = Form(True)
 ):
-    """Upload PDF and extract/process references using appjsonify"""
+    """Upload PDF or Word document and extract/process references"""
     try:
-        if not file.filename.lower().endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+        # Check if file type is supported
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
         
-        if not pdf_extractor or not file_handler:
-            raise HTTPException(status_code=500, detail="PDF processing utilities not initialized")
+        file_extension = file.filename.lower().split('.')[-1]
+        if file_extension not in ['pdf', 'docx', 'doc']:
+            raise HTTPException(status_code=400, detail="Only PDF and Word document files are allowed (.pdf, .docx, .doc)")
+        
+        if not file_handler:
+            raise HTTPException(status_code=500, detail="File processing utilities not initialized")
         
         # Save uploaded file
         file_path = await file_handler.save_uploaded_file(file)
         
         try:
-            # Detect paper type if auto
-            if paper_type == "auto":
-                paper_type = pdf_extractor.detect_paper_type(file_path)
+            # Determine file type and process accordingly
+            file_type = file_handler.get_file_type(file_path)
             
-            # Process PDF with simplified extractor
-            pdf_result = await pdf_extractor.process_pdf_with_extraction(
-                file_path, paper_type, use_ml
-            )
-            
-            if not pdf_result["success"]:
-                return APIResponse(
-                    success=False,
-                    message=f"PDF processing failed: {pdf_result['error']}",
-                    data={"file_info": {"filename": file.filename, "size": file.size}}
+            if file_type == 'pdf':
+                if not pdf_extractor:
+                    raise HTTPException(status_code=500, detail="PDF processing utilities not initialized")
+                
+                # Detect paper type if auto
+                if paper_type == "auto":
+                    paper_type = pdf_extractor.detect_paper_type(file_path)
+                
+                # Process PDF with simplified extractor
+                processing_result = await pdf_extractor.process_pdf_with_extraction(
+                    file_path, paper_type, use_ml
+                )
+                
+            elif file_type == 'word':
+                if not word_processor:
+                    raise HTTPException(status_code=500, detail="Word document processing utilities not initialized")
+                
+                # Detect paper type if auto
+                if paper_type == "auto":
+                    paper_type = word_processor.detect_paper_type(file_path)
+                
+                # Process Word document
+                processing_result = await word_processor.process_word_document(
+                    file_path, paper_type, use_ml
                 )
             
-            references = pdf_result["references"]
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_type}")
+            
+            if not processing_result["success"]:
+                return APIResponse(
+                    success=False,
+                    message=f"Document processing failed: {processing_result['error']}",
+                    data={"file_info": {"filename": file.filename, "size": file.size, "type": file_type}}
+                )
+            
+            references = processing_result["references"]
             
             if not references:
                 return APIResponse(
                     success=False,
-                    message="No references found in PDF",
+                    message=f"No references found in {file_type.upper()} document",
                     data={
-                        "file_info": {"filename": file.filename, "size": file.size},
+                        "file_info": {"filename": file.filename, "size": file.size, "type": file_type},
                         "paper_type": paper_type,
-                        "paper_data": pdf_result["paper_data"]
+                        "paper_data": processing_result["paper_data"]
                     }
                 )
             
             # Process references with tagging and simplified output
             processing_results = []
             if process_references and enhanced_validator and parser and tagger:
-                for i, ref_text in enumerate(references):
+                # Handle both raw text references and structured references
+                for i, ref in enumerate(references):
                     try:
+                        # Extract text from reference (handle both formats)
+                        if isinstance(ref, dict) and "raw" in ref:
+                            ref_text = ref["raw"]
+                        elif isinstance(ref, str):
+                            ref_text = ref
+                        else:
+                            ref_text = str(ref)
+                        
                         # Parse reference
                         reference_data = parser.parse_reference(ref_text)
                         
@@ -571,6 +615,14 @@ async def upload_and_process_pdf(
                             "is_valid": validation_result.is_valid
                         })
                     except Exception as e:
+                        # Handle reference text extraction for error case too
+                        if isinstance(ref, dict) and "raw" in ref:
+                            ref_text = ref["raw"]
+                        elif isinstance(ref, str):
+                            ref_text = ref
+                        else:
+                            ref_text = str(ref)
+                        
                         processing_results.append({
                             "index": i,
                             "original_text": ref_text,
@@ -584,11 +636,12 @@ async def upload_and_process_pdf(
             
             return APIResponse(
                 success=True,
-                message=f"PDF processed successfully. Found {len(references)} references, processed {successful_processing} successfully.",
+                message=f"{file_type.upper()} document processed successfully. Found {len(references)} references, processed {successful_processing} successfully.",
                 data={
                     "file_info": {
                         "filename": file.filename,
                         "size": file.size,
+                        "type": file_type,
                         "references_found": len(references),
                         "successfully_processed": successful_processing
                     },
@@ -608,48 +661,75 @@ async def upload_and_process_pdf(
             file_handler.cleanup_file(file_path)
     
     except Exception as e:
-        logger.error(f"PDF processing error: {str(e)}")
+        logger.error(f"Document processing error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/extract-references-only", response_model=APIResponse)
 async def extract_references_only(file: UploadFile = File(...)):
-    """Upload PDF and extract references without processing"""
+    """Upload PDF or Word document and extract references without processing"""
     try:
-        if not file.filename.lower().endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+        # Check if file type is supported
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
         
-        if not pdf_extractor or not file_handler:
-            raise HTTPException(status_code=500, detail="PDF processing utilities not initialized")
+        file_extension = file.filename.lower().split('.')[-1]
+        if file_extension not in ['pdf', 'docx', 'doc']:
+            raise HTTPException(status_code=400, detail="Only PDF and Word document files are allowed (.pdf, .docx, .doc)")
+        
+        if not file_handler:
+            raise HTTPException(status_code=500, detail="File processing utilities not initialized")
         
         file_path = await file_handler.save_uploaded_file(file)
         
         try:
-            # Detect paper type
-            paper_type = pdf_extractor.detect_paper_type(file_path)
+            # Determine file type and process accordingly
+            file_type = file_handler.get_file_type(file_path)
             
-            # Process PDF with simplified extractor
-            pdf_result = await pdf_extractor.process_pdf_with_extraction(
-                file_path, paper_type, use_ml=True
-            )
-            
-            if not pdf_result["success"]:
-                return APIResponse(
-                    success=False,
-                    message=f"PDF processing failed: {pdf_result['error']}",
-                    data={"file_info": {"filename": file.filename, "size": file.size}}
+            if file_type == 'pdf':
+                if not pdf_extractor:
+                    raise HTTPException(status_code=500, detail="PDF processing utilities not initialized")
+                
+                # Detect paper type
+                paper_type = pdf_extractor.detect_paper_type(file_path)
+                
+                # Process PDF with simplified extractor
+                processing_result = await pdf_extractor.process_pdf_with_extraction(
+                    file_path, paper_type, use_ml=True
+                )
+                
+            elif file_type == 'word':
+                if not word_processor:
+                    raise HTTPException(status_code=500, detail="Word document processing utilities not initialized")
+                
+                # Detect paper type
+                paper_type = word_processor.detect_paper_type(file_path)
+                
+                # Process Word document
+                processing_result = await word_processor.process_word_document(
+                    file_path, paper_type, use_ml=True
                 )
             
-            references = pdf_result["references"]
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_type}")
+            
+            if not processing_result["success"]:
+                return APIResponse(
+                    success=False,
+                    message=f"{file_type.upper()} processing failed: {processing_result['error']}",
+                    data={"file_info": {"filename": file.filename, "size": file.size, "type": file_type}}
+                )
+            
+            references = processing_result["references"]
             
             return APIResponse(
                 success=True,
-                message=f"Extracted {len(references)} references from PDF",
+                message=f"Extracted {len(references)} references from {file_type.upper()} document",
                 data={
-                    "file_info": {"filename": file.filename, "size": file.size},
+                    "file_info": {"filename": file.filename, "size": file.size, "type": file_type},
                     "paper_type": paper_type,
                     "references": references,
-                    "paper_data": pdf_result["paper_data"]
+                    "paper_data": processing_result["paper_data"]
                 }
             )
         
@@ -663,16 +743,17 @@ async def extract_references_only(file: UploadFile = File(...)):
 
 @app.get("/supported-paper-types")
 async def get_supported_paper_types():
-    """Get list of supported paper types for PDF processing"""
-    if not pdf_extractor:
-        raise HTTPException(status_code=500, detail="PDF processing utilities not initialized")
+    """Get list of supported paper types for document processing"""
+    if not pdf_extractor or not word_processor:
+        raise HTTPException(status_code=500, detail="Document processing utilities not initialized")
     
     return APIResponse(
         success=True,
         message="Supported paper types retrieved",
         data={
             "supported_types": pdf_extractor.get_supported_paper_types(),
-            "description": "Use these paper types for better PDF processing accuracy"
+            "supported_file_types": ["pdf", "docx", "doc"],
+            "description": "Use these paper types for better document processing accuracy. Supports both PDF and Word documents."
         }
     )
 

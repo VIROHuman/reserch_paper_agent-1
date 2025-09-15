@@ -20,7 +20,7 @@ class FileHandler:
     async def save_uploaded_file(self, file: UploadFile) -> str:
         """Save uploaded file to temporary directory"""
         try:
-            # Generate unique filename
+            # Generate unique filename with proper extension
             file_extension = Path(file.filename).suffix if file.filename else ".pdf"
             unique_filename = f"{uuid.uuid4()}{file_extension}"
             file_path = self.upload_dir / unique_filename
@@ -36,6 +36,27 @@ class FileHandler:
         except Exception as e:
             logger.error(f"Error saving file: {e}")
             raise
+    
+    def get_file_type(self, file_path: str) -> str:
+        """Determine file type based on extension"""
+        try:
+            file_extension = Path(file_path).suffix.lower()
+            
+            if file_extension == '.pdf':
+                return 'pdf'
+            elif file_extension in ['.docx', '.doc']:
+                return 'word'
+            else:
+                return 'unknown'
+                
+        except Exception as e:
+            logger.warning(f"Error determining file type: {e}")
+            return 'unknown'
+    
+    def is_supported_file_type(self, file_path: str) -> bool:
+        """Check if file type is supported"""
+        file_type = self.get_file_type(file_path)
+        return file_type in ['pdf', 'word']
     
     def cleanup_file(self, file_path: str):
         """Clean up temporary file"""

@@ -162,15 +162,7 @@ class WordDocumentProcessor:
                 logger.info(f"📚 Found reference section at line {actual_start}")
                 references = self._extract_references_from_section(lines[actual_start:])
         
-        # Strategy 4: If still no references, try searching the entire document
-        if len(references) < 3:
-            logger.info(f"⚠️  Only found {len(references)} references, searching entire document")
-            ref_section_start = self._find_reference_section(lines)
-            if ref_section_start is not None:
-                logger.info(f"📚 Found reference section at line {ref_section_start}")
-                references = self._extract_references_from_section(lines[ref_section_start:])
-        
-        # Strategy 5: If still no references, try looking for numbered references in entire document
+        # Strategy 4: If still no references, try looking for numbered references in entire document (without section header)
         if len(references) < 3:
             logger.info(f"⚠️  Only found {len(references)} references, trying numbered reference extraction on entire document")
             numbered_refs = self._extract_numbered_references(text)
@@ -184,10 +176,23 @@ class WordDocumentProcessor:
                 references = structured_refs
                 logger.info(f"🔧 Found {len(references)} numbered references in entire document")
         
+        # Strategy 5: If still no references, try searching the entire document for reference section
+        if len(references) < 3:
+            logger.info(f"⚠️  Only found {len(references)} references, searching entire document for reference section")
+            ref_section_start = self._find_reference_section(lines)
+            if ref_section_start is not None:
+                logger.info(f"📚 Found reference section at line {ref_section_start}")
+                references = self._extract_references_from_section(lines[ref_section_start:])
+        
         # Strategy 6: If still no references, try aggressive pattern matching on entire document
         if len(references) < 3:
             logger.info(f"⚠️  Only found {len(references)} references, trying aggressive pattern matching")
             references = self._extract_references_aggressive(text)
+        
+        # Strategy 7: If still no references, try very loose pattern matching (for cases without section headers)
+        if len(references) < 3:
+            logger.info(f"⚠️  Only found {len(references)} references, trying very loose pattern matching")
+            references = self._extract_references_loose(text)
         
         logger.info(f"📊 Reference extraction completed: {len(references)} references found")
         return references
@@ -279,9 +284,9 @@ class WordDocumentProcessor:
             # But NOT bracket references used in related works [5], [6], [7]
             if re.match(r'^\[\d+\]', line):
                 # Check if this looks like a related works bracket reference
+                # Made less strict to handle cases where section headers are removed
                 line_lower = line.lower()
                 is_related_work = any(indicator in line_lower for indicator in [
-                    'proposed', 'proposes', 'suggests', 'recommends', 'concludes',
                     'this paper', 'our approach', 'we present', 'we propose'
                 ])
                 
@@ -326,11 +331,10 @@ class WordDocumentProcessor:
         logger.info(f"🔧 Processing {len(lines)} lines for numbered references")
         
         # Keywords that indicate this is NOT a reference (related works, etc.)
+        # Made less strict to handle cases where section headers are removed
         exclude_indicators = [
             'related works', 'related work', 'literature review', 'background',
-            'introduction', 'methodology', 'conclusion', 'discussion',
-            'proposed', 'proposes', 'suggests', 'recommends', 'concludes',
-            'this paper', 'our approach', 'we present', 'we propose'
+            'introduction', 'methodology', 'conclusion', 'discussion'
         ]
         
         current_ref = ""
@@ -421,11 +425,10 @@ class WordDocumentProcessor:
         potential_refs = []
         
         # Keywords that indicate this is NOT a reference (related works, etc.)
+        # Made less strict to handle cases where section headers are removed
         exclude_indicators = [
             'related works', 'related work', 'literature review', 'background',
-            'introduction', 'methodology', 'conclusion', 'discussion',
-            'proposed', 'proposes', 'suggests', 'recommends', 'concludes',
-            'this paper', 'our approach', 'we present', 'we propose'
+            'introduction', 'methodology', 'conclusion', 'discussion'
         ]
         
         for line in lines:
@@ -487,9 +490,9 @@ class WordDocumentProcessor:
                     logger.info(f"🔧 Found publication info reference: {line[:100]}...")
             
             # Pattern 8: Contains year patterns (common in references) but with additional context
-            elif re.search(r'\b(19|20)\d{2}\b', line) and len(line) > 50:
+            elif re.search(r'\b(19|20)\d{2}\b', line) and len(line) > 30:  # Lowered threshold
                 # Must contain typical citation elements
-                if re.search(r'[A-Z][a-z]+|doi|journal|conference|proceedings', line, re.IGNORECASE):
+                if re.search(r'[A-Z][a-z]+|doi|journal|conference|proceedings|http', line, re.IGNORECASE):
                     is_reference = True
                     logger.info(f"🔧 Found year-based reference: {line[:100]}...")
             
@@ -497,6 +500,68 @@ class WordDocumentProcessor:
                 potential_refs.append(line)
         
         logger.info(f"🔧 Aggressive extraction found {len(potential_refs)} potential references")
+        
+        # Convert to structured format
+        for i, ref_text in enumerate(potential_refs):
+            references.append({
+                "raw": ref_text.strip()
+            })
+        
+        return references
+    
+    def _extract_references_loose(self, text: str) -> List[Dict[str, Any]]:
+        """Very loose reference extraction for cases where section headers are removed"""
+        references = []
+        
+        logger.info("🔧 Using very loose reference extraction")
+        
+        # Split text into lines
+        lines = text.split('\n')
+        
+        # Look for any line that might be a reference with very loose criteria
+        potential_refs = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line or len(line) < 15:  # Very low threshold
+                continue
+            
+            line_lower = line.lower()
+            
+            # Only exclude obvious non-reference content
+            if any(indicator in line_lower for indicator in [
+                'related works', 'related work', 'literature review', 'background',
+                'introduction', 'methodology', 'conclusion', 'discussion'
+            ]):
+                continue
+            
+            # Very loose patterns for references
+            is_reference = False
+            
+            # Pattern 1: Starts with numbered reference (1., 2., 3., etc.)
+            if re.match(r'^\d+\.\s*', line):
+                is_reference = True
+                logger.info(f"🔧 Found loose numbered reference: {line[:100]}...")
+            
+            # Pattern 2: Contains URL patterns
+            elif re.search(r'https?://', line):
+                is_reference = True
+                logger.info(f"🔧 Found loose URL reference: {line[:100]}...")
+            
+            # Pattern 3: Contains year and looks like a citation
+            elif re.search(r'\b(19|20)\d{2}\b', line) and len(line) > 25:
+                is_reference = True
+                logger.info(f"🔧 Found loose year-based reference: {line[:100]}...")
+            
+            # Pattern 4: Contains author-like patterns
+            elif re.search(r'[A-Z][a-z]+,\s*[A-Z]', line):
+                is_reference = True
+                logger.info(f"🔧 Found loose author reference: {line[:100]}...")
+            
+            if is_reference:
+                potential_refs.append(line)
+        
+        logger.info(f"🔧 Loose extraction found {len(potential_refs)} potential references")
         
         # Convert to structured format
         for i, ref_text in enumerate(potential_refs):

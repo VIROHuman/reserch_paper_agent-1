@@ -6,6 +6,7 @@ class Settings:
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         self.crossref_api_key = os.getenv("CROSSREF_API_KEY")
         self.semantic_scholar_api_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
+        self.unpaywall_email = os.getenv("UNPAYWALL_EMAIL", "bhargavraj8651@gmail.com")
         self.debug = os.getenv("DEBUG", "True").lower() == "true"
         self.log_level = os.getenv("LOG_LEVEL", "INFO")
         self.host = os.getenv("HOST", "0.0.0.0")

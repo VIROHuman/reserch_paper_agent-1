@@ -20,7 +20,6 @@ class CrossRefClient:
             self.headers["Authorization"] = f"Bearer {settings.crossref_api_key}"
     
     async def search_reference(self, query: str, limit: int = 5) -> List[ReferenceData]:
-        logger.info(f"🔍 CROSSREF SEARCH: '{query}' (limit: {limit})")
         try:
             async with httpx.AsyncClient() as client:
                 params = {
@@ -29,34 +28,20 @@ class CrossRefClient:
                     "sort": "relevance"
                 }
                 
-                logger.info(f"📡 CrossRef URL: {self.base_url}/works")
-                logger.info(f"📡 CrossRef params: {params}")
-                
                 response = await client.get(
                     f"{self.base_url}/works",
                     headers=self.headers,
                     params=params,
                     timeout=30.0
                 )
-                logger.info(f"📡 CrossRef response status: {response.status_code}")
                 response.raise_for_status()
                 
                 data = response.json()
-                logger.info(f"📡 CrossRef response keys: {list(data.keys())}")
-                if "message" in data and "items" in data["message"]:
-                    logger.info(f"📡 CrossRef found {len(data['message']['items'])} items")
-                else:
-                    logger.warning("📡 CrossRef response has no items")
-                
                 results = self._parse_crossref_response(data)
-                logger.info(f"✅ CrossRef parsed {len(results)} references")
-                for i, ref in enumerate(results):
-                    logger.info(f"  {i+1}. {ref.title} - {ref.year}")
-                
                 return results
                 
         except Exception as e:
-            logger.error(f"❌ CrossRef API error: {str(e)}")
+            logger.error(f"CrossRef API error: {str(e)}")
             return []
     
     def _parse_crossref_response(self, data: Dict[str, Any]) -> List[ReferenceData]:
@@ -99,10 +84,7 @@ class CrossRefClient:
         return references
     
     async def get_doi_metadata(self, doi: str) -> Dict[str, Any]:
-        """Get metadata for a specific DOI from CrossRef"""
-        logger.info(f"🔍 CROSSREF DOI METADATA: {doi}")
         try:
-            # Normalize DOI
             normalized_doi = self._normalize_doi(doi)
             if not normalized_doi:
                 return {"error": "Invalid DOI format"}
@@ -110,28 +92,23 @@ class CrossRefClient:
             async with httpx.AsyncClient() as client:
                 url = f"{self.base_url}/works/{normalized_doi}"
                 
-                logger.info(f"📡 CrossRef DOI URL: {url}")
-                
                 response = await client.get(
                     url,
                     headers=self.headers,
                     timeout=30.0
                 )
-                logger.info(f"📡 CrossRef DOI response status: {response.status_code}")
                 response.raise_for_status()
                 
                 data = response.json()
-                logger.info(f"📡 CrossRef DOI response keys: {list(data.keys())}")
                 
                 if "message" not in data:
                     return {"error": "No message in CrossRef response"}
                 
                 metadata = self._parse_crossref_doi_metadata(data["message"])
-                logger.info(f"✅ CrossRef DOI metadata extracted successfully")
                 return metadata
                 
         except Exception as e:
-            logger.error(f"❌ CrossRef DOI API error: {str(e)}")
+            logger.error(f"CrossRef DOI API error: {str(e)}")
             return {"error": str(e)}
     
     def _normalize_doi(self, doi: str) -> str:
@@ -139,10 +116,8 @@ class CrossRefClient:
         if not doi:
             return ""
         
-        # Strip whitespace
         doi = doi.strip()
         
-        # Remove any existing https://doi.org/ prefix
         if doi.startswith("https://doi.org/"):
             doi = doi[16:]
         elif doi.startswith("http://doi.org/"):
@@ -150,12 +125,10 @@ class CrossRefClient:
         elif doi.startswith("doi.org/"):
             doi = doi[8:]
         
-        # Ensure it starts with 10.
         if not doi.startswith("10."):
-            logger.warning(f"⚠️ Invalid DOI format: {doi}")
+            logger.warning(f"Invalid DOI format: {doi}")
             return ""
         
-        # Convert to lowercase
         doi = doi.lower()
         
         return doi
@@ -234,8 +207,6 @@ class OpenAlexClient:
         }
     
     async def search_reference(self, query: str, limit: int = 5) -> List[ReferenceData]:
-        """Search for reference using OpenAlex API"""
-        logger.info(f"🔍 OPENALEX SEARCH: '{query}' (limit: {limit})")
         try:
             async with httpx.AsyncClient() as client:
                 params = {
@@ -244,34 +215,20 @@ class OpenAlexClient:
                     "sort": "relevance_score:desc"
                 }
                 
-                logger.info(f"📡 OpenAlex URL: {self.base_url}/works")
-                logger.info(f"📡 OpenAlex params: {params}")
-                
                 response = await client.get(
                     f"{self.base_url}/works",
                     headers=self.headers,
                     params=params,
                     timeout=30.0
                 )
-                logger.info(f"📡 OpenAlex response status: {response.status_code}")
                 response.raise_for_status()
                 
                 data = response.json()
-                logger.info(f"📡 OpenAlex response keys: {list(data.keys())}")
-                if "results" in data:
-                    logger.info(f"📡 OpenAlex found {len(data['results'])} items")
-                else:
-                    logger.warning("📡 OpenAlex response has no results")
-                
                 results = self._parse_openalex_response(data)
-                logger.info(f"✅ OpenAlex parsed {len(results)} references")
-                for i, ref in enumerate(results):
-                    logger.info(f"  {i+1}. {ref.title} - {ref.year}")
-                
                 return results
                 
         except Exception as e:
-            logger.error(f"❌ OpenAlex API error: {str(e)}")
+            logger.error(f"OpenAlex API error: {str(e)}")
             return []
     
     def _parse_openalex_response(self, data: Dict[str, Any]) -> List[ReferenceData]:
@@ -291,9 +248,7 @@ class OpenAlexClient:
                                 surname=" ".join(author.get("display_name", "").split()[1:]) if author.get("display_name") else None,
                                 full_name=author.get("display_name")
                             ))
-                    
-                    # Extract publication details
-                    # Convert abstract_inverted_index to string
+
                     abstract_text = None
                     if item.get("abstract_inverted_index"):
                         abstract_text = self._convert_abstract_index_to_text(item["abstract_inverted_index"])
@@ -321,23 +276,17 @@ class OpenAlexClient:
         if not abstract_index:
             return ""
         
-        # Create a list of (word, position) tuples
         word_positions = []
         for word, positions in abstract_index.items():
             for pos in positions:
                 word_positions.append((pos, word))
         
-        # Sort by position
         word_positions.sort(key=lambda x: x[0])
         
-        # Join words in order
         return " ".join([word for _, word in word_positions])
     
     async def get_doi_metadata(self, doi: str) -> Dict[str, Any]:
-        """Get metadata for a specific DOI from OpenAlex"""
-        logger.info(f"🔍 OPENALEX DOI METADATA: {doi}")
         try:
-            # Normalize DOI
             normalized_doi = self._normalize_doi(doi)
             if not normalized_doi:
                 return {"error": "Invalid DOI format"}
@@ -345,25 +294,19 @@ class OpenAlexClient:
             async with httpx.AsyncClient() as client:
                 url = f"{self.base_url}/works/doi:{normalized_doi}"
                 
-                logger.info(f"📡 OpenAlex DOI URL: {url}")
-                
                 response = await client.get(
                     url,
                     headers=self.headers,
                     timeout=30.0
                 )
-                logger.info(f"📡 OpenAlex DOI response status: {response.status_code}")
                 response.raise_for_status()
                 
                 data = response.json()
-                logger.info(f"📡 OpenAlex DOI response keys: {list(data.keys())}")
-                
                 metadata = self._parse_openalex_doi_metadata(data)
-                logger.info(f"✅ OpenAlex DOI metadata extracted successfully")
                 return metadata
                 
         except Exception as e:
-            logger.error(f"❌ OpenAlex DOI API error: {str(e)}")
+            logger.error(f"OpenAlex DOI API error: {str(e)}")
             return {"error": str(e)}
     
     def _normalize_doi(self, doi: str) -> str:
@@ -371,10 +314,8 @@ class OpenAlexClient:
         if not doi:
             return ""
         
-        # Strip whitespace
         doi = doi.strip()
         
-        # Remove any existing https://doi.org/ prefix
         if doi.startswith("https://doi.org/"):
             doi = doi[16:]
         elif doi.startswith("http://doi.org/"):
@@ -382,12 +323,10 @@ class OpenAlexClient:
         elif doi.startswith("doi.org/"):
             doi = doi[8:]
         
-        # Ensure it starts with 10.
         if not doi.startswith("10."):
-            logger.warning(f"⚠️ Invalid DOI format: {doi}")
+            logger.warning(f"Invalid DOI format: {doi}")
             return ""
-        
-        # Convert to lowercase
+
         doi = doi.lower()
         
         return doi
@@ -527,7 +466,6 @@ class DOAJClient:
         """Search for reference using DOAJ API"""
         try:
             async with httpx.AsyncClient() as client:
-                # DOAJ uses path parameter for search query
                 encoded_query = query.replace(" ", "%20")
                 
                 response = await client.get(

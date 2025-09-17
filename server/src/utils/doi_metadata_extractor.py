@@ -26,19 +26,17 @@ class DOIMetadataExtractor:
             from .api_clients import CrossRefClient, OpenAlexClient
             self.crossref_client = CrossRefClient()
             self.openalex_client = OpenAlexClient()
-            logger.info("✅ DOI Metadata Extractor initialized with CrossRef and OpenAlex")
+            logger.info("DOI Metadata Extractor initialized with CrossRef and OpenAlex")
         except Exception as e:
-            logger.warning(f"⚠️ Failed to initialize some clients: {e}")
+            logger.warning(f"Failed to initialize some clients: {e}")
     
     def normalize_doi(self, doi: str) -> str:
         """Normalize DOI: strip spaces, ensure lowercase, prepend https://doi.org/ if missing"""
         if not doi:
             return ""
         
-        # Strip whitespace
         doi = doi.strip()
         
-        # Remove any existing https://doi.org/ prefix
         if doi.startswith("https://doi.org/"):
             doi = doi[16:]
         elif doi.startswith("http://doi.org/"):
@@ -46,15 +44,12 @@ class DOIMetadataExtractor:
         elif doi.startswith("doi.org/"):
             doi = doi[8:]
         
-        # Ensure it starts with 10.
         if not doi.startswith("10."):
-            logger.warning(f"⚠️ Invalid DOI format: {doi}")
+            logger.warning(f" Invalid DOI format: {doi}")
             return ""
         
-        # Convert to lowercase
         doi = doi.lower()
         
-        # Return normalized DOI
         return doi
     
     def get_doi_url(self, doi: str) -> str:
@@ -65,14 +60,10 @@ class DOIMetadataExtractor:
         return f"https://doi.org/{normalized_doi}"
     
     async def extract_metadata(self, doi: str) -> Dict[str, Any]:
-        """Extract metadata for a DOI using multiple APIs in order"""
         normalized_doi = self.normalize_doi(doi)
         if not normalized_doi:
             return {"error": "Invalid DOI format"}
         
-        logger.info(f"🔍 DOI METADATA EXTRACTION: {normalized_doi}")
-        
-        # Try APIs in order of preference
         apis_to_try = [
             ("CrossRef", self._extract_from_crossref),
             ("OpenAlex", self._extract_from_openalex),
@@ -81,20 +72,15 @@ class DOIMetadataExtractor:
         
         for api_name, extract_func in apis_to_try:
             try:
-                logger.info(f"🌐 Trying {api_name} API...")
                 metadata = await extract_func(normalized_doi)
                 if metadata and not metadata.get("error"):
-                    logger.info(f"✅ Successfully extracted metadata from {api_name}")
                     metadata["source_api"] = api_name
                     metadata["doi_url"] = self.get_doi_url(normalized_doi)
                     return metadata
-                else:
-                    logger.warning(f"⚠️ {api_name} returned no data")
             except Exception as e:
-                logger.warning(f"⚠️ {api_name} API failed: {str(e)}")
+                logger.warning(f"{api_name} API failed: {str(e)}")
                 continue
         
-        logger.error(f"❌ All APIs failed for DOI: {normalized_doi}")
         return {"error": "Metadata not found for DOI"}
     
     async def _extract_from_crossref(self, doi: str) -> Dict[str, Any]:
@@ -308,16 +294,13 @@ class DOIMetadataExtractor:
     def _convert_abstract_index_to_text(self, abstract_index: Dict[str, List[int]]) -> str:
         """Convert OpenAlex abstract inverted index to text"""
         try:
-            # Create a list of (position, word) tuples
             words_with_positions = []
             for word, positions in abstract_index.items():
                 for pos in positions:
                     words_with_positions.append((pos, word))
             
-            # Sort by position
             words_with_positions.sort(key=lambda x: x[0])
             
-            # Join words
             return " ".join([word for _, word in words_with_positions])
         except Exception as e:
             logger.error(f"Error converting abstract index: {str(e)}")
@@ -328,7 +311,6 @@ class DOIMetadataConflictDetector:
     """Enhanced conflict detection between online metadata and LLM-extracted data"""
     
     def __init__(self):
-        # Field comparison weights for conflict resolution
         self.field_weights = {
             "title": 0.30,
             "authors": 0.25,
@@ -337,14 +319,13 @@ class DOIMetadataConflictDetector:
             "doi": 0.10
         }
         
-        # Minimum similarity thresholds for field matching
         self.similarity_thresholds = {
             "title": 0.7,
             "journal": 0.6,
             "authors": 0.5
         }
         
-        logger.info("✅ Enhanced DOI Metadata Conflict Detector initialized")
+        logger.info("Enhanced DOI Metadata Conflict Detector initialized")
     
     def detect_conflicts(self, online_metadata: Dict[str, Any], ollama_data: Dict[str, Any]) -> Dict[str, Any]:
         """Enhanced conflict detection with detailed comparison analysis"""
@@ -358,7 +339,6 @@ class DOIMetadataConflictDetector:
             "resolution_strategy": "online_preferred"
         }
         
-        # Enhanced field-by-field comparison
         fields_to_compare = ["title", "year", "journal", "authors", "doi"]
         
         for field in fields_to_compare:
@@ -371,7 +351,6 @@ class DOIMetadataConflictDetector:
             conflicts["field_comparisons"][field] = field_comparison
             conflicts["similarity_scores"][field] = field_comparison["similarity"]
             
-            # Determine preferred value
             if field_comparison["has_conflict"]:
                 conflicts["has_conflicts"] = True
                 conflicts["conflicts"].append({
@@ -387,12 +366,10 @@ class DOIMetadataConflictDetector:
             else:
                 conflicts["preferred_data"][field] = field_comparison["preferred_value"]
         
-        # Calculate overall confidence scores
         conflicts["confidence_scores"] = self._calculate_confidence_scores(
             online_metadata, ollama_data, conflicts["field_comparisons"]
         )
         
-        # Check year conflicts
         online_year = online_metadata.get("year")
         ollama_year = ollama_data.get("year")
         
@@ -410,7 +387,6 @@ class DOIMetadataConflictDetector:
         elif ollama_year:
             conflicts["preferred_data"]["year"] = ollama_year
         
-        # Check journal conflicts
         online_journal = online_metadata.get("journal", "").lower().strip() if online_metadata.get("journal") else ""
         ollama_journal = ollama_data.get("journal", "").lower().strip() if ollama_data.get("journal") else ""
         
@@ -428,7 +404,6 @@ class DOIMetadataConflictDetector:
         elif ollama_journal:
             conflicts["preferred_data"]["journal"] = ollama_data.get("journal")
         
-        # Check author conflicts (more complex)
         online_authors = [author.lower().strip() for author in online_metadata.get("authors", [])]
         ollama_authors = []
         if ollama_data.get("family_names") and ollama_data.get("given_names"):
@@ -440,7 +415,6 @@ class DOIMetadataConflictDetector:
                     ollama_authors.append(full_name.lower().strip())
         
         if online_authors and ollama_authors:
-            # Check if author lists are significantly different
             online_set = set(online_authors)
             ollama_set = set(ollama_authors)
             
@@ -458,7 +432,6 @@ class DOIMetadataConflictDetector:
         elif ollama_authors:
             conflicts["preferred_data"]["authors"] = ollama_authors
         
-        # Calculate confidence scores
         conflicts["confidence_scores"] = {
             "online_confidence": 0.9 if online_metadata.get("source_api") else 0.0,
             "ollama_confidence": 0.7 if ollama_data.get("title") else 0.0
@@ -467,7 +440,7 @@ class DOIMetadataConflictDetector:
         return conflicts
     
     def _compare_field(self, field: str, online_value: Any, ollama_value: Any) -> Dict[str, Any]:
-        """Compare a specific field between online and Ollama data"""
+        """Compare a specific field between online and LLM data"""
         comparison = {
             "field": field,
             "online_value": online_value,
@@ -501,7 +474,7 @@ class DOIMetadataConflictDetector:
         
         if not online_title:
             comparison["preferred_value"] = ollama_title
-            comparison["preferred"] = "ollama"
+            comparison["preferred"] = "LLM"
             comparison["confidence"] = 0.7
             return comparison
         
@@ -524,7 +497,7 @@ class DOIMetadataConflictDetector:
             comparison["preferred_value"] = online_title
             comparison["confidence"] = 0.9
         else:
-            # High similarity - prefer online data
+            # High similarity - prefer LLM data
             comparison["preferred"] = "online"
             comparison["preferred_value"] = online_title
             comparison["confidence"] = 0.95

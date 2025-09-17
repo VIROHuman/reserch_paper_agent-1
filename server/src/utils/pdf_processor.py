@@ -8,7 +8,13 @@ from typing import List, Dict, Any, Optional
 from loguru import logger
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-import spacy
+from .api_clients import GROBIDClient
+
+try:
+    import spacy
+    SPACY_AVAILABLE = True
+except ImportError:
+    SPACY_AVAILABLE = False
 
 
 class PDFReferenceExtractor:
@@ -17,8 +23,14 @@ class PDFReferenceExtractor:
         self.executor = ThreadPoolExecutor(max_workers=2)
         self.nlp = None
         self._load_spacy_model()
+        self.grobid_client = GROBIDClient()
         
     def _load_spacy_model(self):
+        if not SPACY_AVAILABLE:
+            logger.warning("spaCy not available. GROBID will be used for all processing.")
+            self.nlp = None
+            return
+            
         try:
             try:
                 self.nlp = spacy.load("en_core_web_trf")
@@ -34,10 +46,55 @@ class PDFReferenceExtractor:
         self,
         pdf_path: str,
         paper_type: str = "ACL",
-        use_ml: bool = True
+        use_ml: bool = True,
+        use_grobid: bool = True
     ) -> Dict[str, Any]:
-        """Process PDF and extract references using simplified approach"""
+        """Process PDF and extract references with GROBID as primary method"""
         try:
+            # Try GROBID first for better accuracy
+            if use_grobid:
+                try:
+                    logger.info("🔬 Attempting GROBID processing first...")
+                    grobid_result = await self.grobid_client.process_pdf_document(pdf_path)
+                    
+                    if grobid_result.get("success") and grobid_result.get("references"):
+                        logger.info(f"✅ GROBID processing successful: {grobid_result['reference_count']} references found")
+                        
+                        # Convert GROBID references to expected format with smart enrichment
+                        formatted_references = []
+                        for ref in grobid_result["references"]:
+                            # Use GROBID data as base, only enrich missing fields
+                            enriched_ref = await self._enrich_grobid_reference(ref)
+                            formatted_references.append({
+                                "raw": self._format_reference_from_grobid(ref),
+                                "parsed": enriched_ref
+                            })
+                        
+                        # Extract paper metadata from GROBID or fallback to local extraction
+                        paper_data = grobid_result.get("document_metadata", {})
+                        if not paper_data:
+                            paper_data = await asyncio.get_event_loop().run_in_executor(
+                                self.executor,
+                                self._extract_paper_metadata,
+                                pdf_path
+                            )
+                        
+                        return {
+                            "success": True,
+                            "paper_data": paper_data,
+                            "references": formatted_references,
+                            "reference_count": len(formatted_references),
+                            "paper_type": paper_type,
+                            "processing_method": "grobid"
+                        }
+                    else:
+                        logger.warning("⚠️ GROBID processing failed, falling back to local extraction")
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ GROBID processing error: {str(e)}, falling back to local extraction")
+            
+            # Fallback to local extraction
+            logger.info("📄 Using local PDF extraction...")
             references = await asyncio.get_event_loop().run_in_executor(
                 self.executor,
                 self._extract_references_from_pdf,
@@ -55,7 +112,8 @@ class PDFReferenceExtractor:
                 "paper_data": paper_data,
                 "references": references,
                 "reference_count": len(references),
-                "paper_type": paper_type
+                "paper_type": paper_type,
+                "processing_method": "local"
             }
                 
         except Exception as e:
@@ -66,6 +124,51 @@ class PDFReferenceExtractor:
                 "references": [],
                 "reference_count": 0
             }
+    
+    def _format_reference_from_grobid(self, ref_data: Dict[str, Any]) -> str:
+        """Format GROBID parsed reference data back to text format"""
+        try:
+            parts = []
+            
+            # Add authors
+            if ref_data.get("family_names") and ref_data.get("given_names"):
+                authors = []
+                for i, (family, given) in enumerate(zip(ref_data["family_names"], ref_data["given_names"])):
+                    if family and given:
+                        authors.append(f"{family}, {given}")
+                    elif family:
+                        authors.append(family)
+                if authors:
+                    if len(authors) == 1:
+                        parts.append(authors[0])
+                    else:
+                        parts.append(f"{authors[0]} et al." if len(authors) > 1 else ", ".join(authors))
+            
+            # Add year
+            if ref_data.get("year"):
+                parts.append(f"({ref_data['year']})")
+            
+            # Add title
+            if ref_data.get("title"):
+                parts.append(f'"{ref_data["title"]}"')
+            
+            # Add journal
+            if ref_data.get("journal"):
+                parts.append(ref_data["journal"])
+            
+            # Add pages
+            if ref_data.get("pages"):
+                parts.append(f"pp. {ref_data['pages']}")
+            
+            # Add DOI
+            if ref_data.get("doi"):
+                parts.append(f"DOI: {ref_data['doi']}")
+            
+            return ". ".join(parts) + "."
+            
+        except Exception as e:
+            logger.error(f"Error formatting GROBID reference: {str(e)}")
+            return str(ref_data)
     
     def _extract_references_from_pdf(self, pdf_path: str) -> List[Dict[str, Any]]:
         """Extract references from PDF using multiple methods"""
@@ -389,3 +492,123 @@ class PDFReferenceExtractor:
     def get_supported_paper_types(self) -> List[str]:
         """Get list of supported paper types"""
         return ["AAAI", "ACL", "ICML", "ICLR", "NeurIPS", "IEEE", "ACM", "Springer", "Generic"]
+    
+    async def _enrich_grobid_reference(self, grobid_ref: Dict[str, Any]) -> Dict[str, Any]:
+        """Smart enrichment of GROBID reference - only fill missing fields"""
+        try:
+            logger.info(f"🔍 Smart enrichment for GROBID reference: {grobid_ref.get('title', 'Unknown')[:50]}...")
+            
+            # Start with GROBID data as base
+            enriched_ref = grobid_ref.copy()
+            
+            # Identify missing fields
+            missing_fields = []
+            if not enriched_ref.get('family_names') or not enriched_ref.get('given_names'):
+                missing_fields.append('authors')
+            if not enriched_ref.get('title'):
+                missing_fields.append('title')
+            if not enriched_ref.get('year'):
+                missing_fields.append('year')
+            if not enriched_ref.get('journal'):
+                missing_fields.append('journal')
+            if not enriched_ref.get('doi'):
+                missing_fields.append('doi')
+            if not enriched_ref.get('publisher'):
+                missing_fields.append('publisher')
+            if not enriched_ref.get('url'):
+                missing_fields.append('url')
+            
+            logger.info(f"🔍 Missing fields: {missing_fields}")
+            
+            # Only enrich if we have missing fields
+            if missing_fields:
+                # Create search query from available data
+                search_query = self._create_search_query_from_grobid(grobid_ref)
+                
+                # Try API enrichment only for missing fields
+                api_result = await self._enrich_missing_fields_only(
+                    enriched_ref, missing_fields, search_query
+                )
+                
+                if api_result:
+                    # Merge only the missing fields
+                    for field in missing_fields:
+                        if field in api_result and api_result[field]:
+                            enriched_ref[field] = api_result[field]
+                            logger.info(f"✅ Enriched {field}: {api_result[field]}")
+            
+            # Calculate confidence score
+            confidence = self._calculate_confidence_score(enriched_ref)
+            enriched_ref['confidence'] = confidence
+            
+            logger.info(f"🎯 Final confidence: {confidence:.2f}")
+            return enriched_ref
+            
+        except Exception as e:
+            logger.error(f"❌ Smart enrichment failed: {str(e)}")
+            return grobid_ref
+    
+    def _create_search_query_from_grobid(self, grobid_ref: Dict[str, Any]) -> str:
+        """Create search query from GROBID reference data"""
+        parts = []
+        
+        if grobid_ref.get('title'):
+            parts.append(grobid_ref['title'])
+        
+        if grobid_ref.get('family_names'):
+            parts.extend(grobid_ref['family_names'][:2])  # First 2 authors
+        
+        if grobid_ref.get('year'):
+            parts.append(str(grobid_ref['year']))
+        
+        return ' '.join(parts)
+    
+    async def _enrich_missing_fields_only(self, ref: Dict[str, Any], missing_fields: List[str], search_query: str) -> Optional[Dict[str, Any]]:
+        """Enrich only the missing fields using APIs"""
+        try:
+            # Try CrossRef first
+            crossref_result = await self.enhanced_parser.smart_api_strategy.crossref_client.search_reference(search_query, limit=1)
+            if crossref_result:
+                return self._extract_missing_fields_from_api_result(crossref_result[0], missing_fields)
+            
+            # Try OpenAlex
+            openalex_result = await self.enhanced_parser.smart_api_strategy.openalex_client.search_reference(search_query, limit=1)
+            if openalex_result:
+                return self._extract_missing_fields_from_api_result(openalex_result[0], missing_fields)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ API enrichment failed: {str(e)}")
+            return None
+    
+    def _extract_missing_fields_from_api_result(self, api_result: Dict[str, Any], missing_fields: List[str]) -> Dict[str, Any]:
+        """Extract only the missing fields from API result"""
+        result = {}
+        
+        for field in missing_fields:
+            if field == 'authors' and 'authors' in api_result:
+                result['family_names'] = api_result['authors'].get('family_names', [])
+                result['given_names'] = api_result['authors'].get('given_names', [])
+            elif field in api_result:
+                result[field] = api_result[field]
+        
+        return result
+    
+    def _calculate_confidence_score(self, ref: Dict[str, Any]) -> float:
+        """Calculate confidence score based on data completeness"""
+        fields = ['family_names', 'given_names', 'title', 'year', 'journal']
+        filled_fields = sum(1 for field in fields if ref.get(field))
+        
+        # Base score from GROBID
+        base_score = filled_fields / len(fields)
+        
+        # Bonus for DOI (indicates high quality)
+        if ref.get('doi'):
+            base_score += 0.1
+        
+        # Bonus for publisher
+        if ref.get('publisher'):
+            base_score += 0.05
+        
+        return min(base_score, 1.0)

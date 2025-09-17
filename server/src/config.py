@@ -14,5 +14,5 @@ class Settings:
         self.crossref_base_url = "https://api.crossref.org"
         self.openalex_base_url = "https://api.openalex.org"
         self.semantic_scholar_base_url = "https://api.semanticscholar.org/graph/v1"
-        self.grobid_base_url = "https://cloud.science-miner.com/grobid/api"
+        self.grobid_base_url = "http://localhost:8070"
 settings = Settings()

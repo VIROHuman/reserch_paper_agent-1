@@ -1,4 +1,5 @@
 import httpx
+import requests
 import asyncio
 from typing import List, Dict, Any, Optional
 from loguru import logger
@@ -591,40 +592,236 @@ class DOAJClient:
 
 
 class GROBIDClient:
-    """Client for GROBID API"""
+    """Client for GROBID API - specialized for academic document parsing"""
     
     def __init__(self):
         self.base_url = settings.grobid_base_url
         self.headers = {
-            "Accept": "application/xml"
+            "Accept": "application/xml, text/plain, */*"
         }
     
-    async def parse_reference(self, reference_text: str) -> Optional[ReferenceData]:
-        """Parse reference text using GROBID API"""
+    async def process_pdf_document(self, pdf_path: str) -> Dict[str, Any]:
+        """Process entire PDF document with GROBID using requests for reliable file uploads"""
         try:
-            async with httpx.AsyncClient() as client:
+            logger.info(f"🔬 GROBID: Processing PDF document: {pdf_path}")
+            
+            # Use requests in a thread pool to avoid blocking the event loop
+            # This ensures immediate file reading and eliminates httpx I/O issues
+            response = await asyncio.to_thread(self._process_pdf_with_requests, pdf_path)
+            
+            # Debug log for raw XML
+            logger.info(f"🔬 GROBID raw XML response (first 500 chars): {response.text[:500]}")
+            logger.info(f"🔬 GROBID response length: {len(response.text)} characters")
+
+            # Parse XML response
+            result = self._parse_grobid_xml_response(response.text)
+            logger.info(f"🔬 GROBID parsing result: success={result.get('success')}, references={result.get('reference_count', 0)}")
+            return result
+                    
+        except Exception as e:
+            logger.error(f"❌ GROBID API error: {str(e)}")
+            return {"success": False, "error": str(e)}
+    
+    def _process_pdf_with_requests(self, pdf_path: str):
+        """Synchronous method using requests for GROBID PDF processing"""
+        try:
+            logger.info(f"🔬 GROBID: Opening PDF file: {pdf_path}")
+            with open(pdf_path, 'rb') as pdf_file:
+                files = {"input": (pdf_path, pdf_file, "application/pdf")}
                 data = {
-                    "input": reference_text
+                    "consolidateHeader": 1,
+                    "consolidateCitations": 0,
+                    "includeRawCitations": 1,
+                    "includeRawAffiliations": 1
                 }
                 
-                response = await client.post(
-                    f"{self.base_url}/processReferences",
-                    headers=self.headers,
+                logger.info(f"🔬 GROBID: Sending request to {self.base_url}/api/processFulltextDocument")
+                response = requests.post(
+                    f"{self.base_url}/api/processFulltextDocument",
+                    files=files,
                     data=data,
-                    timeout=30.0
+                    timeout=120.0
+                )
+                logger.info(f"🔬 GROBID: Response status: {response.status_code}")
+                response.raise_for_status()
+                return response
+        except Exception as e:
+            logger.error(f"❌ GROBID requests error: {str(e)}")
+            raise
+    
+    async def process_reference_text(self, reference_text: str) -> Optional[ReferenceData]:
+        """Parse individual reference text using GROBID"""
+        try:
+            logger.info(f"🔬 GROBID: Processing reference text: {reference_text[:100]}...")
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                data = {"input": reference_text}
+                
+                response = await client.post(
+                    f"{self.base_url}/api/processReferences",
+                    data=data
                 )
                 response.raise_for_status()
                 
-                # Parse XML response (simplified)
-                return self._parse_grobid_response(response.text)
+                return self._parse_grobid_xml_response(response.text)
                 
         except Exception as e:
-            logger.error(f"GROBID API error: {str(e)}")
+            logger.error(f"❌ GROBID API error: {str(e)}")
             return None
     
-    def _parse_grobid_response(self, xml_content: str) -> Optional[ReferenceData]:
-        """Parse GROBID XML response"""
-        # This is a simplified parser - in production, use proper XML parsing
-        # For now, return None as GROBID parsing requires more complex XML handling
-        logger.info("GROBID parsing not fully implemented - requires XML parsing")
+    def _parse_grobid_xml_response(self, xml_content: str) -> Dict[str, Any]:
+        """Parse GROBID XML response and extract references"""
+        try:
+            import xml.etree.ElementTree as ET
+            
+            root = ET.fromstring(xml_content)
+            
+            # Extract document metadata
+            doc_metadata = self._extract_document_metadata(root)
+            
+            # Extract references
+            references = self._extract_references_from_xml(root)
+            
+            return {
+                "success": True,
+                "document_metadata": doc_metadata,
+                "references": references,
+                "reference_count": len(references)
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ GROBID XML parsing error: {str(e)}")
+            return {"success": False, "error": str(e)}
+    
+    def _extract_document_metadata(self, root) -> Dict[str, Any]:
+        """Extract document metadata from GROBID XML"""
+        metadata = {}
+        
+        # Extract title
+        title_elem = root.find('.//titleStmt/title')
+        if title_elem is not None:
+            metadata["title"] = title_elem.text
+        
+        # Extract authors
+        authors = []
+        for author in root.findall('.//titleStmt/author'):
+            pers_name = author.find('persName')
+            if pers_name is not None:
+                surname = pers_name.find('surname')
+                forename = pers_name.find('forename')
+                if surname is not None and forename is not None:
+                    authors.append({
+                        "family_name": surname.text,
+                        "given_name": forename.text
+                    })
+        metadata["authors"] = authors
+        
+        # Extract abstract
+        abstract_elem = root.find('.//abstract')
+        if abstract_elem is not None:
+            metadata["abstract"] = abstract_elem.text
+        
+        return metadata
+    
+    def _extract_references_from_xml(self, root) -> List[Dict[str, Any]]:
+        """Extract references from GROBID XML"""
+        references = []
+        
+        # Debug: Log the XML structure to understand what GROBID returns
+        logger.info(f"🔬 GROBID XML structure analysis:")
+        
+        # Check for different possible reference structures
+        list_bibl = root.findall('.//listBibl')
+        logger.info(f"🔬 Found {len(list_bibl)} listBibl elements")
+        
+        bibl_struct = root.findall('.//biblStruct')
+        logger.info(f"🔬 Found {len(bibl_struct)} biblStruct elements")
+        
+        # Also check for other possible reference structures
+        ref_elements = root.findall('.//ref')
+        logger.info(f"🔬 Found {len(ref_elements)} ref elements")
+        
+        # Check for references in different namespaces
+        all_refs = root.findall('.//{http://www.tei-c.org/ns/1.0}listBibl/{http://www.tei-c.org/ns/1.0}biblStruct')
+        logger.info(f"🔬 Found {len(all_refs)} namespaced biblStruct elements")
+        
+        # Try both namespaced and non-namespaced references
+        for ref_elem in root.findall('.//listBibl/biblStruct'):
+            ref_data = self._parse_single_reference(ref_elem)
+            if ref_data:
+                references.append(ref_data)
+        
+        # Also try namespaced references
+        for ref_elem in root.findall('.//{http://www.tei-c.org/ns/1.0}listBibl/{http://www.tei-c.org/ns/1.0}biblStruct'):
+            ref_data = self._parse_single_reference(ref_elem)
+            if ref_data:
+                references.append(ref_data)
+        
+        logger.info(f"🔬 GROBID extracted {len(references)} references")
+        return references
+    
+    def _parse_single_reference(self, ref_elem) -> Optional[Dict[str, Any]]:
+        """Parse a single reference from GROBID XML"""
+        try:
+            ref_data = {
+                "family_names": [],
+                "given_names": [],
+                "year": None,
+                "title": None,
+                "journal": None,
+                "doi": None,
+                "pages": None,
+                "publisher": None,
+                "url": None
+            }
+            
+            # Extract authors (try both namespaced and non-namespaced)
+            for author in ref_elem.findall('.//author/persName') + ref_elem.findall('.//{http://www.tei-c.org/ns/1.0}author/{http://www.tei-c.org/ns/1.0}persName'):
+                surname = author.find('surname') or author.find('{http://www.tei-c.org/ns/1.0}surname')
+                forename = author.find('forename') or author.find('{http://www.tei-c.org/ns/1.0}forename')
+                if surname is not None:
+                    ref_data["family_names"].append(surname.text or "")
+                if forename is not None:
+                    ref_data["given_names"].append(forename.text or "")
+            
+            # Extract title (try both namespaced and non-namespaced)
+            title_elem = (ref_elem.find('.//title[@level="a"]') or 
+                         ref_elem.find('.//{http://www.tei-c.org/ns/1.0}title[@level="a"]'))
+            if title_elem is not None:
+                ref_data["title"] = title_elem.text
+            
+            # Extract journal (try both namespaced and non-namespaced)
+            journal_elem = (ref_elem.find('.//title[@level="j"]') or 
+                           ref_elem.find('.//{http://www.tei-c.org/ns/1.0}title[@level="j"]'))
+            if journal_elem is not None:
+                ref_data["journal"] = journal_elem.text
+            
+            # Extract year (try both namespaced and non-namespaced)
+            date_elem = (ref_elem.find('.//date') or 
+                        ref_elem.find('.//{http://www.tei-c.org/ns/1.0}date'))
+            if date_elem is not None:
+                ref_data["year"] = date_elem.get('when', date_elem.text)
+            
+            # Extract pages (try both namespaced and non-namespaced)
+            pages_elem = (ref_elem.find('.//biblScope[@unit="page"]') or 
+                         ref_elem.find('.//{http://www.tei-c.org/ns/1.0}biblScope[@unit="page"]'))
+            if pages_elem is not None:
+                ref_data["pages"] = pages_elem.text
+            
+            # Extract DOI (try both namespaced and non-namespaced)
+            doi_elem = (ref_elem.find('.//idno[@type="DOI"]') or 
+                       ref_elem.find('.//{http://www.tei-c.org/ns/1.0}idno[@type="DOI"]'))
+            if doi_elem is not None:
+                ref_data["doi"] = doi_elem.text
+            
+            # Extract publisher (try both namespaced and non-namespaced)
+            publisher_elem = (ref_elem.find('.//publisher') or 
+                             ref_elem.find('.//{http://www.tei-c.org/ns/1.0}publisher'))
+            if publisher_elem is not None:
+                ref_data["publisher"] = publisher_elem.text
+            
+            return ref_data
+            
+        except Exception as e:
+            logger.error(f"❌ Error parsing single reference: {str(e)}")
         return None

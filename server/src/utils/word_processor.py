@@ -5,8 +5,6 @@ from typing import List, Dict, Any, Optional
 from loguru import logger
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-import spacy
-
 try:
     from docx import Document
     from docx.shared import Inches
@@ -14,6 +12,12 @@ try:
 except ImportError:
     DOCX_AVAILABLE = False
     logger.warning("python-docx not available. Word document processing will be disabled.")
+
+try:
+    import spacy
+    SPACY_AVAILABLE = True
+except ImportError:
+    SPACY_AVAILABLE = False
 
 
 class WordDocumentProcessor:
@@ -24,6 +28,11 @@ class WordDocumentProcessor:
         self._load_spacy_model()
         
     def _load_spacy_model(self):
+        if not SPACY_AVAILABLE:
+            logger.warning("spaCy not available. Using regex-based processing.")
+            self.nlp = None
+            return
+            
         try:
             try:
                 self.nlp = spacy.load("en_core_web_trf")

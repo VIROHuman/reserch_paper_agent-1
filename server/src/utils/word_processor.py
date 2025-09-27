@@ -47,8 +47,7 @@ class WordDocumentProcessor:
     async def process_word_document(
         self,
         doc_path: str,
-        paper_type: str = "auto",
-        use_ml: bool = True
+        paper_type: str = "auto"
     ) -> Dict[str, Any]:
         try:
             if not DOCX_AVAILABLE:

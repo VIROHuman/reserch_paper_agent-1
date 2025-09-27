@@ -2,11 +2,11 @@
 Enhanced reference parser that integrates API clients for missing field completion
 """
 import asyncio
+import re
 from typing import List, Dict, Any, Optional
 from loguru import logger
 
 from .simple_parser import SimpleReferenceParser
-from .ollama_parser import OllamaReferenceParser
 from .api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient
 from .smart_api_strategy import SmartAPIStrategy
 from .doi_metadata_extractor import DOIMetadataExtractor, DOIMetadataConflictDetector
@@ -18,7 +18,6 @@ class EnhancedReferenceParser:
     
     def __init__(self):
         self.simple_parser = SimpleReferenceParser()
-        self.ollama_parser = OllamaReferenceParser()
         
         # Initialize smart API strategy
         self.smart_api = SmartAPIStrategy()
@@ -38,19 +37,230 @@ class EnhancedReferenceParser:
         
         logger.info("Enhanced reference parser initialized with Smart API Strategy, DOI extraction, and Flagging System")
     
+    async def _enhanced_initial_parsing(self, ref_text: str) -> Dict[str, Any]:
+        """Enhanced initial parsing that combines multiple strategies"""
+        try:
+            # Enhanced parsing with multiple strategies
+            # Start with simple parser as base
+            parsed_ref = self.simple_parser.parse_reference(ref_text)
+            
+            # If simple parser didn't extract much, try alternative approaches
+            if not parsed_ref.get("title") or len(parsed_ref.get("title", "")) < 10:
+                # Try improved title extraction
+                parsed_ref["title"] = self._extract_title_enhanced(ref_text)
+            
+            if not parsed_ref.get("journal") or len(parsed_ref.get("journal", "")) < 5:
+                # Try improved journal extraction
+                parsed_ref["journal"] = self._extract_journal_enhanced(ref_text)
+            
+            if not parsed_ref.get("family_names"):
+                # Try improved author extraction
+                authors = self._extract_authors_enhanced(ref_text)
+                parsed_ref["family_names"] = [author["surname"] for author in authors]
+                parsed_ref["given_names"] = [author["given"] for author in authors]
+            
+            # Try to extract publisher if missing
+            if not parsed_ref.get("publisher"):
+                parsed_ref["publisher"] = self._extract_publisher(ref_text)
+            
+            # Try to extract URL if missing
+            if not parsed_ref.get("url"):
+                parsed_ref["url"] = self._extract_url(ref_text)
+            
+            return parsed_ref
+            
+        except Exception as e:
+            logger.error(f"Enhanced initial parsing error: {str(e)}")
+            # Fallback to simple parser
+            return self.simple_parser.parse_reference(ref_text)
+    
+    def _extract_title_enhanced(self, text: str) -> Optional[str]:
+        """Enhanced title extraction with multiple strategies"""
+        import re
+        
+        # Strategy 1: Title in quotes
+        title_in_quotes = re.search(r'"([^"]{15,})"', text)
+        if title_in_quotes:
+            return title_in_quotes.group(1).strip()
+        
+        # Strategy 2: Title between authors and year
+        year_match = re.search(r'\b(19|20)\d{2}\b', text)
+        if year_match:
+            before_year = text[:year_match.start()].strip()
+            # Look for title patterns
+            title_patterns = [
+                r'[A-Z][^.]{15,}\.',  # Capital letter followed by long text ending with period
+                r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+){2,}',  # Multiple capitalized words
+            ]
+            
+            for pattern in title_patterns:
+                match = re.search(pattern, before_year)
+                if match:
+                    title = match.group().strip()
+                    if len(title) > 15 and not title.lower().startswith(('vol', 'pp', 'p.')):
+                        return title
+        
+        return None
+    
+    def _extract_journal_enhanced(self, text: str) -> Optional[str]:
+        """Enhanced journal extraction"""
+        import re
+        
+        # Strategy 1: Italicized text
+        italic_match = re.search(r'<i>([^<]+)</i>', text)
+        if italic_match:
+            return italic_match.group(1).strip()
+        
+        # Strategy 2: Common journal patterns
+        journal_patterns = [
+            r'([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*[,.]\s*\d{4}',
+            r'([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*vol',
+            r'In:\s*([^,.]{8,})',
+        ]
+        
+        for pattern in journal_patterns:
+            match = re.search(pattern, text)
+            if match:
+                journal = match.group(1).strip()
+                if len(journal) > 8:
+                    return journal
+        
+        return None
+    
+    def _extract_authors_enhanced(self, text: str) -> List[Dict[str, str]]:
+        """Enhanced author extraction with title word filtering"""
+        import re
+        
+        authors = []
+        
+        # Strategy 1: Standard academic format "Last, First" - more specific
+        pattern1 = r'(?:^|\s)([A-Z][a-z]{2,}),\s*([A-Z]\.(?:\s*[A-Z]\.)*)(?=\s|$)'
+        matches1 = re.findall(pattern1, text)
+        
+        for surname, given in matches1:
+            # Validate that this looks like a real author name
+            if self._is_valid_author_name_enhanced(surname, given, text):
+                authors.append({
+                    "surname": surname.strip(),
+                    "given": given.strip().replace('.', '').replace(' ', '')
+                })
+        
+        # Strategy 2: "First Last" format - more specific
+        if not authors:
+            pattern2 = r'(?:^|\s)([A-Z]\.(?:\s*[A-Z]\.)*)\s+([A-Z][a-z]{2,})(?=\s|$)'
+            matches2 = re.findall(pattern2, text)
+            
+            for given, surname in matches2:
+                if self._is_valid_author_name_enhanced(surname, given, text):
+                    authors.append({
+                        "surname": surname.strip(),
+                        "given": given.strip().replace('.', '').replace(' ', '')
+                    })
+        
+        # Final validation: remove any authors that appear to be from the title
+        authors = self._filter_title_words_enhanced(authors, text)
+        
+        return authors[:5]  # Limit to first 5 authors
+    
+    def _is_valid_author_name_enhanced(self, surname: str, given: str, full_text: str) -> bool:
+        """Validate if a name candidate is actually an author name - enhanced version"""
+        # Check minimum length requirements
+        if len(surname) < 3 or len(given.strip('.')) < 1:
+            return False
+        
+        # Common title words that should not be author names
+        title_words = {
+            'health', 'care', 'blockchain', 'revolution', 'sweeps', 'offering',
+            'possibility', 'much', 'needed', 'data', 'solution', 'reaction',
+            'chain', 'system', 'technology', 'digital', 'innovation', 'development',
+            'research', 'study', 'analysis', 'approach', 'method', 'model',
+            'framework', 'algorithm', 'network', 'platform', 'application',
+            'management', 'service', 'process', 'implementation', 'evaluation'
+        }
+        
+        # Don't accept common title words as surnames
+        if surname.lower() in title_words:
+            return False
+        
+        return True
+    
+    def _filter_title_words_enhanced(self, authors: List[Dict[str, str]], full_text: str) -> List[Dict[str, str]]:
+        """Filter out author candidates that are likely title words - enhanced version"""
+        filtered_authors = []
+        
+        # Extract potential title section (before year or journal indicators)
+        year_match = re.search(r'\b(19|20)\d{2}\b', full_text)
+        title_section = full_text[:year_match.start()] if year_match else full_text
+        
+        for author in authors:
+            surname = author['surname']
+            
+            # Skip if surname appears in title section with title-like context
+            if self._appears_in_title_context_enhanced(surname, title_section):
+                continue
+                
+            filtered_authors.append(author)
+        
+        return filtered_authors
+    
+    def _appears_in_title_context_enhanced(self, surname: str, title_section: str) -> bool:
+        """Check if a surname appears in title-like context - enhanced version"""
+        import re
+        
+        # Look for patterns where the surname is part of a title phrase
+        title_context_patterns = [
+            r'[A-Z][a-z]*\s+' + re.escape(surname) + r'\s+[A-Z][a-z]*',  # Word Surname Word
+            r'[A-Z][a-z]*\s+' + re.escape(surname) + r'[,:]',  # Word Surname, or Word Surname:
+            r':\s*[A-Z][a-z]*\s+' + re.escape(surname),  # : Word Surname
+            r'[A-Z][a-z]*\s+' + re.escape(surname) + r'\s+[A-Z][a-z]*\s+[A-Z]',  # Word Surname Word Word
+        ]
+        
+        for pattern in title_context_patterns:
+            if re.search(pattern, title_section, re.IGNORECASE):
+                return True
+        
+        return False
+    
+    def _extract_publisher(self, text: str) -> Optional[str]:
+        """Extract publisher information"""
+        import re
+        
+        # Common publisher patterns
+        publisher_patterns = [
+            r'Published by\s+([^,.]{5,})',
+            r'Publisher:\s*([^,.]{5,})',
+            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+Press',
+            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+Publishing',
+        ]
+        
+        for pattern in publisher_patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1).strip()
+        
+        return None
+    
+    def _extract_url(self, text: str) -> Optional[str]:
+        """Extract URL from reference"""
+        import re
+        
+        # Look for URLs
+        url_pattern = r'https?://[^\s,)]+'
+        match = re.search(url_pattern, text)
+        if match:
+            return match.group().strip()
+        
+        return None
+    
     async def parse_reference_enhanced(
         self, 
         ref_text: str, 
-        use_ollama: bool = True,
         enable_api_enrichment: bool = True
     ) -> Dict[str, Any]:
         try:
-            if use_ollama and self.ollama_parser.client:
-                parsed_ref = self.ollama_parser.parse_reference(ref_text)
-                parser_used = "ollama"
-            else:
-                parsed_ref = self.simple_parser.parse_reference(ref_text)
-                parser_used = "simple"
+            # Use enhanced parsing strategy - combine multiple approaches
+            parsed_ref = await self._enhanced_initial_parsing(ref_text)
+            parser_used = "enhanced"
             
             doi_metadata = None
             conflict_analysis = None
@@ -89,6 +299,10 @@ class EnhancedReferenceParser:
                 
                 enriched_ref["flagging_analysis"] = self.flagging_system.format_flags_for_api(flags)
                 
+                # Calculate status and confidence
+                status_info = self._calculate_status_and_confidence(enriched_ref, enriched_ref.get("flagging_analysis", {}))
+                enriched_ref.update(status_info)
+                
                 return enriched_ref
             else:
                 parsed_ref["parser_used"] = parser_used
@@ -111,6 +325,10 @@ class EnhancedReferenceParser:
                 )
                 
                 parsed_ref["flagging_analysis"] = self.flagging_system.format_flags_for_api(flags)
+                
+                # Calculate status and confidence
+                status_info = self._calculate_status_and_confidence(parsed_ref, parsed_ref.get("flagging_analysis", {}))
+                parsed_ref.update(status_info)
                 
                 return parsed_ref
                 
@@ -444,3 +662,98 @@ class EnhancedReferenceParser:
         tagged_output += '</reference>'
         
         return tagged_output
+    
+    def _calculate_status_and_confidence(self, parsed_ref: Dict[str, Any], flagging_analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """Calculate Verified/Suspect/Unverified status and confidence"""
+        try:
+            # Extract key metrics
+            has_timeout = any("timeout" in str(flag).lower() for flag in flagging_analysis.get("flags", []))
+            has_conflicts = flagging_analysis.get("has_conflicts", False)
+            has_domain_issues = any("domain" in str(flag).lower() for flag in flagging_analysis.get("flags", []))
+            
+            # Calculate confidence based on available fields
+            confidence = 0.0
+            field_count = 0
+            
+            if parsed_ref.get("title"):
+                confidence += 0.2
+                field_count += 1
+            if parsed_ref.get("family_names"):
+                confidence += 0.2
+                field_count += 1
+            if parsed_ref.get("year"):
+                confidence += 0.15
+                field_count += 1
+            if parsed_ref.get("journal"):
+                confidence += 0.15
+                field_count += 1
+            if parsed_ref.get("doi"):
+                confidence += 0.2
+                field_count += 1
+            if parsed_ref.get("pages"):
+                confidence += 0.1
+                field_count += 1
+            
+            # Determine status based on requirements
+            if has_timeout or has_conflicts or has_domain_issues:
+                status = "Unverified"
+                confidence = min(confidence, 0.3)  # Cap confidence for problematic cases
+            elif confidence >= 0.8 and field_count >= 5:
+                status = "Verified"
+            elif confidence >= 0.6:
+                status = "Suspect"
+            else:
+                status = "Unverified"
+            
+            # Generate reasons
+            reasons = []
+            if confidence < 0.6:
+                reasons.append("low confidence")
+            if has_timeout:
+                reasons.append("timeout")
+            if has_conflicts:
+                reasons.append("source conflict")
+            if has_domain_issues:
+                reasons.append("domain mismatch")
+            if field_count < 4:
+                reasons.append("insufficient fields")
+            
+            # Determine matched fields
+            matched_fields = []
+            if parsed_ref.get("doi"):
+                matched_fields.append("doi")
+            if parsed_ref.get("journal"):
+                matched_fields.append("journal")
+            if parsed_ref.get("abstract"):
+                matched_fields.append("abstract")
+            if parsed_ref.get("url"):
+                matched_fields.append("url")
+            
+            # Determine sources used
+            sources_used = []
+            if parsed_ref.get("api_enrichment_used"):
+                sources_used.extend(parsed_ref.get("enrichment_sources", []))
+            if parsed_ref.get("doi_metadata"):
+                sources_used.append("DOI")
+            
+            return {
+                "status": status,
+                "confidence": round(confidence, 2),
+                "sources_used": sources_used,
+                "matched_fields": matched_fields,
+                "reasons": reasons,
+                "domain_check": "pass" if not has_domain_issues else "fail",
+                "timeout": has_timeout
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating status: {e}")
+            return {
+                "status": "Unverified",
+                "confidence": 0.0,
+                "sources_used": [],
+                "matched_fields": [],
+                "reasons": ["calculation error"],
+                "domain_check": "unknown",
+                "timeout": False
+            }

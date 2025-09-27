@@ -9,6 +9,7 @@ from loguru import logger
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from .api_clients import GROBIDClient
+from .enhanced_parser import EnhancedReferenceParser
 
 try:
     import spacy
@@ -24,6 +25,7 @@ class PDFReferenceExtractor:
         self.nlp = None
         self._load_spacy_model()
         self.grobid_client = GROBIDClient()
+        self.enhanced_parser = EnhancedReferenceParser()
         
     def _load_spacy_model(self):
         if not SPACY_AVAILABLE:
@@ -33,20 +35,21 @@ class PDFReferenceExtractor:
             
         try:
             try:
+                logger.info("Loading spaCy transformer model...")
                 self.nlp = spacy.load("en_core_web_trf")
-                logger.info("Loaded spaCy transformer model")
+                logger.info("✅ Loaded spaCy transformer model")
             except OSError:
+                logger.info("Loading spaCy small model...")
                 self.nlp = spacy.load("en_core_web_sm")
-                logger.info("Loaded spaCy small model")
+                logger.info("✅ Loaded spaCy small model")
         except OSError:
-            logger.warning("spaCy model not found. Install with: python -m spacy download en_core_web_sm")
+            logger.warning("⚠️ spaCy model not found. Install with: python -m spacy download en_core_web_sm")
             self.nlp = None
     
     async def process_pdf_with_extraction(
         self,
         pdf_path: str,
         paper_type: str = "ACL",
-        use_ml: bool = True,
         use_grobid: bool = True
     ) -> Dict[str, Any]:
         """Process PDF and extract references with GROBID as primary method"""
@@ -60,11 +63,11 @@ class PDFReferenceExtractor:
                     if grobid_result.get("success") and grobid_result.get("references"):
                         logger.info(f"✅ GROBID processing successful: {grobid_result['reference_count']} references found")
                         
-                        # Convert GROBID references to expected format with smart enrichment
+                        # Convert GROBID references to expected format with API enrichment
                         formatted_references = []
                         for ref in grobid_result["references"]:
-                            # Use GROBID data as base, only enrich missing fields
-                            enriched_ref = await self._enrich_grobid_reference(ref)
+                            # Use GROBID data as base, enrich with API data for missing fields
+                            enriched_ref = await self._enrich_grobid_reference_with_apis(ref)
                             formatted_references.append({
                                 "raw": self._format_reference_from_grobid(ref),
                                 "parsed": enriched_ref
@@ -93,13 +96,32 @@ class PDFReferenceExtractor:
                 except Exception as e:
                     logger.warning(f"⚠️ GROBID processing error: {str(e)}, falling back to local extraction")
             
-            # Fallback to local extraction
-            logger.info("📄 Using local PDF extraction...")
-            references = await asyncio.get_event_loop().run_in_executor(
+            # Fallback to enhanced parser with local extraction
+            logger.info("📄 Using enhanced parser with local PDF extraction...")
+            
+            # Extract raw text first
+            raw_references = await asyncio.get_event_loop().run_in_executor(
                 self.executor,
                 self._extract_references_from_pdf,
                 pdf_path
             )
+            
+            # Process with enhanced parser for better results
+            formatted_references = []
+            for ref in raw_references:
+                try:
+                    # Use enhanced parser to improve the reference
+                    enhanced_ref = await self.enhanced_parser.parse_reference_enhanced(ref.get("raw", ""))
+                    formatted_references.append({
+                        "raw": ref.get("raw", ""),
+                        "parsed": enhanced_ref
+                    })
+                except Exception as e:
+                    logger.warning(f"Enhanced parsing failed for reference: {e}")
+                    formatted_references.append({
+                        "raw": ref.get("raw", ""),
+                        "parsed": ref.get("parsed", {})
+                    })
             
             paper_data = await asyncio.get_event_loop().run_in_executor(
                 self.executor,
@@ -110,10 +132,10 @@ class PDFReferenceExtractor:
             return {
                 "success": True,
                 "paper_data": paper_data,
-                "references": references,
-                "reference_count": len(references),
+                "references": formatted_references,
+                "reference_count": len(formatted_references),
                 "paper_type": paper_type,
-                "processing_method": "local"
+                "processing_method": "enhanced_parser"
             }
                 
         except Exception as e:
@@ -570,3 +592,188 @@ class PDFReferenceExtractor:
             base_score += 0.05
         
         return min(base_score, 1.0)
+    
+    async def _enrich_grobid_reference_with_apis(self, grobid_ref: Dict[str, Any]) -> Dict[str, Any]:
+        """Enrich GROBID reference data with API information for missing fields"""
+        try:
+            # Convert GROBID format to our standard format
+            enriched_ref = {
+                "family_names": grobid_ref.get("family_names", []),
+                "given_names": grobid_ref.get("given_names", []),
+                "year": grobid_ref.get("year"),
+                "title": grobid_ref.get("title"),
+                "journal": grobid_ref.get("journal"),
+                "doi": grobid_ref.get("doi"),
+                "pages": grobid_ref.get("pages"),
+                "publisher": grobid_ref.get("publisher"),
+                "url": grobid_ref.get("url"),
+                "parser_used": "grobid",
+                "api_enrichment_used": False,
+                "enrichment_sources": []
+            }
+            
+            # If we have a DOI, try to get additional metadata
+            if grobid_ref.get("doi"):
+                try:
+                    doi_metadata = await self.enhanced_parser.doi_extractor.extract_doi_metadata(grobid_ref["doi"])
+                    if doi_metadata and not doi_metadata.get("error"):
+                        # Fill missing fields with DOI metadata
+                        if not enriched_ref["title"] and doi_metadata.get("title"):
+                            enriched_ref["title"] = doi_metadata["title"]
+                            enriched_ref["enrichment_sources"].append("DOI")
+                        
+                        if not enriched_ref["journal"] and doi_metadata.get("journal"):
+                            enriched_ref["journal"] = doi_metadata["journal"]
+                            enriched_ref["enrichment_sources"].append("DOI")
+                        
+                        if not enriched_ref["publisher"] and doi_metadata.get("publisher"):
+                            enriched_ref["publisher"] = doi_metadata["publisher"]
+                            enriched_ref["enrichment_sources"].append("DOI")
+                        
+                        if not enriched_ref["year"] and doi_metadata.get("year"):
+                            enriched_ref["year"] = doi_metadata["year"]
+                            enriched_ref["enrichment_sources"].append("DOI")
+                        
+                        # Add DOI metadata
+                        enriched_ref["doi_metadata"] = doi_metadata
+                        enriched_ref["api_enrichment_used"] = True
+                        
+                except Exception as e:
+                    logger.warning(f"DOI metadata extraction failed: {str(e)}")
+            
+            # If we still don't have enough information, try API search
+            search_query = None
+            if grobid_ref.get("title"):
+                search_query = grobid_ref["title"]
+            elif grobid_ref.get("family_names") and grobid_ref.get("year"):
+                search_query = f"{' '.join(grobid_ref['family_names'])} {grobid_ref['year']}"
+            
+            if search_query and len([v for v in enriched_ref.values() if v]) < 4:
+                try:
+                    api_result = await self.enhanced_parser.smart_api.enrich_reference_smart(
+                        enriched_ref,
+                        search_query
+                    )
+                    
+                    if api_result:
+                        # Merge API results with GROBID data
+                        for key, value in api_result.items():
+                            if not enriched_ref.get(key) and value:
+                                enriched_ref[key] = value
+                                if key not in enriched_ref["enrichment_sources"]:
+                                    enriched_ref["enrichment_sources"].append("API")
+                        
+                        enriched_ref["api_enrichment_used"] = True
+                        
+                except Exception as e:
+                    logger.warning(f"API enrichment failed: {str(e)}")
+            
+            # Calculate quality metrics
+            enriched_ref["quality_score"] = self._calculate_reference_quality_score(enriched_ref)
+            enriched_ref["missing_fields"] = self._identify_missing_fields(enriched_ref)
+            
+            return enriched_ref
+            
+        except Exception as e:
+            logger.error(f"Error enriching GROBID reference: {str(e)}")
+            return {
+                "family_names": grobid_ref.get("family_names", []),
+                "given_names": grobid_ref.get("given_names", []),
+                "year": grobid_ref.get("year"),
+                "title": grobid_ref.get("title"),
+                "journal": grobid_ref.get("journal"),
+                "doi": grobid_ref.get("doi"),
+                "pages": grobid_ref.get("pages"),
+                "publisher": grobid_ref.get("publisher"),
+                "url": grobid_ref.get("url"),
+                "parser_used": "grobid",
+                "api_enrichment_used": False,
+                "enrichment_sources": [],
+                "error": str(e)
+            }
+    
+    def _calculate_reference_quality_score(self, ref_data: Dict[str, Any]) -> float:
+        """Calculate quality score for a reference (0.0 to 1.0) - improved scoring"""
+        try:
+            score = 0.0
+            
+            # Essential fields with more lenient scoring
+            title = ref_data.get("title", "")
+            if title and len(title.strip()) > 20:
+                score += 0.30  # Full points for good title
+            elif title and len(title.strip()) > 10:
+                score += 0.25  # High points for decent title
+            elif title and len(title.strip()) > 5:
+                score += 0.20  # Partial points for short title
+            
+            # Authors with partial credit
+            family_names = ref_data.get("family_names", [])
+            if family_names and len(family_names) > 0:
+                if len(family_names) >= 2:
+                    score += 0.25  # Full points for multiple authors
+                else:
+                    score += 0.20  # Partial points for single author
+            
+            # Year validation
+            year = ref_data.get("year")
+            if year and str(year).isdigit() and 1800 <= int(year) <= 2030:
+                score += 0.20
+            
+            # Journal with partial credit
+            journal = ref_data.get("journal", "")
+            if journal and len(journal.strip()) > 10:
+                score += 0.15  # Full points for good journal
+            elif journal and len(journal.strip()) > 5:
+                score += 0.12  # Partial points for short journal
+            
+            # DOI bonus
+            if ref_data.get("doi"):
+                score += 0.08
+            
+            # Pages bonus
+            if ref_data.get("pages"):
+                score += 0.05
+            
+            # Publisher bonus
+            if ref_data.get("publisher"):
+                score += 0.03
+            
+            # URL bonus
+            if ref_data.get("url"):
+                score += 0.02
+            
+            # Abstract bonus
+            if ref_data.get("abstract"):
+                score += 0.02
+            
+            # Ensure minimum score if we have basic info
+            if (title and len(title) > 5) and (family_names or year):
+                score = max(score, 0.35)
+            
+            return min(score, 1.0)
+            
+        except Exception as e:
+            logger.error(f"Error calculating quality score: {e}")
+            return 0.0
+    
+    def _identify_missing_fields(self, ref_data: Dict[str, Any]) -> List[str]:
+        """Identify missing fields in a reference"""
+        try:
+            missing = []
+            essential_fields = ["title", "family_names", "year"]
+            important_fields = ["journal", "doi"]
+            optional_fields = ["pages", "publisher", "url", "abstract"]
+            
+            for field in essential_fields + important_fields + optional_fields:
+                if not ref_data.get(field):
+                    missing.append(field)
+                elif field == "family_names" and isinstance(ref_data[field], list) and len(ref_data[field]) == 0:
+                    missing.append(field)
+                elif field == "year" and not str(ref_data[field]).isdigit():
+                    missing.append(field)
+            
+            return missing
+            
+        except Exception as e:
+            logger.error(f"Error identifying missing fields: {e}")
+            return []

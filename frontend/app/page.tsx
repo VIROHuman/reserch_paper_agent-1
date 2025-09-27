@@ -13,15 +13,18 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState("upload")
-  const { processFile, loading, error, data, reset } = useFileProcessing()
+  const { processFile, loading, error, data, progress, reset } = useFileProcessing()
   const [processingOptions, setProcessingOptions] = useState({
     paperType: "auto",
     processReferences: true,
     validateAll: true,
   })
 
-  const handleFileProcess = async (file: File) => {
-    const result = await processFile(file, processingOptions)
+  const handleFileProcess = async (file: File, useStreaming?: boolean) => {
+    const result = await processFile(file, {
+      ...processingOptions,
+      useStreaming: useStreaming ?? true  // Default to streaming for better reliability
+    })
     if (result) {
       setActiveTab("results")
     }
@@ -30,6 +33,10 @@ export default function Home() {
   const handleNewFile = () => {
     reset()
     setActiveTab("upload")
+  }
+
+  const handleViewReferences = () => {
+    setActiveTab("references")
   }
 
   return (
@@ -63,7 +70,7 @@ export default function Home() {
               <div className="grid lg:grid-cols-3 gap-8">
                 <div className="lg:col-span-2 space-y-6">
                   <FileUploadSection onFileProcess={handleFileProcess} />
-                  {loading && <ProcessingStatus isVisible={loading} />}
+                  {loading && <ProcessingStatus isVisible={loading} progress={progress} />}
                 </div>
 
                 <div className="space-y-6">
@@ -73,7 +80,7 @@ export default function Home() {
             </TabsContent>
 
             <TabsContent value="results" className="space-y-6">
-              <ResultsDashboard data={data} onNewFile={handleNewFile} />
+              <ResultsDashboard data={data} onNewFile={handleNewFile} onViewReferences={handleViewReferences} />
             </TabsContent>
 
             <TabsContent value="references" className="space-y-6">

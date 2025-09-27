@@ -13,7 +13,7 @@ class CrossRefClient:
     def __init__(self):
         self.base_url = settings.crossref_base_url
         self.headers = {
-            "User-Agent": "ResearchPaperAgent/1.0 (mailto:your-email@example.com)",
+            "User-Agent": "ResearchPaperAgent/1.0 (mailto:user@example.com)",
             "Accept": "application/json"
         }
         if settings.crossref_api_key:
@@ -202,7 +202,7 @@ class OpenAlexClient:
     def __init__(self):
         self.base_url = settings.openalex_base_url
         self.headers = {
-            "User-Agent": "ResearchPaperAgent/1.0 (mailto:your-email@example.com)",
+            "User-Agent": "ResearchPaperAgent/1.0 (mailto:user@example.com)",
             "Accept": "application/json"
         }
     
@@ -385,7 +385,7 @@ class SemanticScholarClient:
     def __init__(self):
         self.base_url = settings.semantic_scholar_base_url
         self.headers = {
-            "User-Agent": "ResearchPaperAgent/1.0 (mailto:your-email@example.com)",
+            "User-Agent": "ResearchPaperAgent/1.0 (mailto:user@example.com)",
             "Accept": "application/json"
         }
         if settings.semantic_scholar_api_key:
@@ -458,7 +458,7 @@ class DOAJClient:
     def __init__(self):
         self.base_url = "https://doaj.org/api"
         self.headers = {
-            "User-Agent": "ResearchPaperAgent/1.0 (mailto:your-email@example.com)",
+            "User-Agent": "ResearchPaperAgent/1.0 (mailto:user@example.com)",
             "Accept": "application/json"
         }
     
@@ -762,4 +762,4 @@ class GROBIDClient:
             
         except Exception as e:
             logger.error(f"❌ Error parsing single reference: {str(e)}")
-        return None
+            return None

@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { apiClient, type HealthCheckData, type ProcessingData, type SupportedTypesData } from "@/lib/api"
+import { apiClient, type HealthCheckData, type ProcessingData, type SupportedTypesData, type ProcessingProgress } from "@/lib/api"
 
 export function useHealthCheck() {
   const [data, setData] = useState<HealthCheckData | null>(null)
@@ -40,6 +40,7 @@ export function useFileProcessing() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [data, setData] = useState<ProcessingData | null>(null)
+  const [progress, setProgress] = useState<ProcessingProgress | null>(null)
 
   const processFile = async (
     file: File,
@@ -47,25 +48,50 @@ export function useFileProcessing() {
       processReferences?: boolean
       validateAll?: boolean
       paperType?: string
+      useStreaming?: boolean
     } = {},
   ) => {
     try {
       setLoading(true)
       setError(null)
+      setProgress(null)
 
-      const response = await apiClient.uploadAndProcess(
-        file,
-        options.processReferences ?? true,
-        options.validateAll ?? true,
-        options.paperType ?? "auto",
-      )
+      if (options.useStreaming) {
+        // Use streaming upload for better progress tracking
+        const response = await apiClient.uploadWithProgress(
+          file,
+          options.processReferences ?? true,
+          options.validateAll ?? true,
+          options.paperType ?? "auto",
+          (progressUpdate) => {
+            setProgress(progressUpdate)
+          }
+        )
 
-      if (response.success) {
-        setData(response.data)
-        return response.data
+        if (response.success) {
+          setData(response.data)
+          setProgress(null)
+          return response.data
+        } else {
+          setError(response.message)
+          return null
+        }
       } else {
-        setError(response.message)
-        return null
+        // Fallback to regular upload for smaller files
+        const response = await apiClient.uploadAndProcess(
+          file,
+          options.processReferences ?? true,
+          options.validateAll ?? true,
+          options.paperType ?? "auto",
+        )
+
+        if (response.success) {
+          setData(response.data)
+          return response.data
+        } else {
+          setError(response.message)
+          return null
+        }
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "Processing failed"
@@ -80,6 +106,7 @@ export function useFileProcessing() {
     setData(null)
     setError(null)
     setLoading(false)
+    setProgress(null)
   }
 
   return {
@@ -87,6 +114,7 @@ export function useFileProcessing() {
     loading,
     error,
     data,
+    progress,
     reset,
   }
 }

@@ -9,6 +9,7 @@ import { Progress } from "@/components/ui/progress"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
+import { type ProcessingProgress } from "@/lib/api"
 
 interface ProcessingStep {
   id: string
@@ -24,14 +25,18 @@ interface ProcessingStep {
 interface ProcessingStatusProps {
   isVisible?: boolean
   onCancel?: () => void
+  progress?: ProcessingProgress | null
 }
 
-export function ProcessingStatus({ isVisible = false, onCancel }: ProcessingStatusProps) {
-  const [progress, setProgress] = useState(0)
+export function ProcessingStatus({ isVisible = false, onCancel, progress: realProgress }: ProcessingStatusProps) {
+  const [simulatedProgress, setSimulatedProgress] = useState(0)
   const [currentStep, setCurrentStep] = useState(0)
-  const [startTime, setStartTime] = useState<Date | null>(null)
-  const [elapsedTime, setElapsedTime] = useState(0)
   const [isPaused, setIsPaused] = useState(false)
+  
+  // Use real progress if available, otherwise fall back to simulated progress
+  const progress = realProgress?.progress ?? simulatedProgress
+  const currentStepName = realProgress?.current_step ?? "Processing"
+  const status = realProgress?.status ?? "processing"
 
   const steps: ProcessingStep[] = [
     {
@@ -63,44 +68,36 @@ export function ProcessingStatus({ isVisible = false, onCancel }: ProcessingStat
     },
   ]
 
-  // Simulate processing progress
+  // Simulate progress if no real progress available
   useEffect(() => {
-    if (!isVisible || isPaused) return
-
-    if (!startTime) {
-      setStartTime(new Date())
-    }
+    if (!isVisible) return
 
     const interval = setInterval(() => {
-      setElapsedTime((prev) => prev + 1)
-
-      setProgress((prev) => {
-        if (prev >= 100) {
-          if (currentStep < steps.length - 1) {
-            setCurrentStep((curr) => curr + 1)
-            return 0
+      // Only simulate progress if no real progress is available
+      if (!realProgress && !isPaused) {
+        setSimulatedProgress((prev) => {
+          if (prev >= 100) {
+            if (currentStep < steps.length - 1) {
+              setCurrentStep((curr) => curr + 1)
+              return 0
+            }
+            return 100
           }
-          return 100
-        }
-        return prev + Math.random() * 3 + 1
-      })
-    }, 500)
+          return prev + Math.random() * 3 + 1
+        })
+      }
+    }, 1000)
 
     return () => clearInterval(interval)
-  }, [isVisible, currentStep, steps.length, isPaused, startTime])
+  }, [isVisible, currentStep, steps.length, isPaused, realProgress])
 
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return `${mins}:${secs.toString().padStart(2, "0")}`
-  }
 
   const togglePause = () => {
     setIsPaused(!isPaused)
   }
 
   const currentStepData = steps[currentStep]
-  const isCompleted = currentStep >= steps.length - 1 && progress >= 100
+  const isCompleted = realProgress ? status === "completed" : (currentStep >= steps.length - 1 && progress >= 100)
 
   if (!isVisible) return null
 
@@ -120,10 +117,10 @@ export function ProcessingStatus({ isVisible = false, onCancel }: ProcessingStat
           </CardTitle>
           <div className="flex items-center gap-2">
             <Badge variant="outline" className="text-primary border-primary/20">
-              {isCompleted ? "Completed" : isPaused ? "Paused" : "Processing"}
+              {isCompleted ? "Completed" : isPaused ? "Paused" : status === "error" ? "Error" : "Processing"}
             </Badge>
             <Badge variant="secondary" className="text-xs">
-              {formatTime(elapsedTime)}
+              Processing
             </Badge>
           </div>
         </div>
@@ -233,15 +230,14 @@ export function ProcessingStatus({ isVisible = false, onCancel }: ProcessingStat
               ? "Processing completed successfully! Results are ready for review."
               : isPaused
                 ? `Processing paused at ${currentStepData?.label}. Click resume to continue.`
-                : `${currentStepData?.description}... This may take a few minutes.`}
+                : realProgress
+                  ? `${realProgress.message}...`
+                  : `${currentStepData?.description}...`}
           </p>
         </div>
 
         {/* Control Buttons */}
         <div className="flex items-center justify-between pt-2">
-          <div className="text-xs text-muted-foreground">
-            {isCompleted ? `Completed in ${formatTime(elapsedTime)}` : `Elapsed: ${formatTime(elapsedTime)}`}
-          </div>
 
           <div className="flex items-center gap-2">
             {!isCompleted && (

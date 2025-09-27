@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  grobid:
+    image: grobid/grobid:0.8.2
+    ports:
+      - "8070:8070"
+    environment:
+      - JAVA_OPTS=-Xmx4g -XX:+UseG1GC
+    volumes:
+      - grobid_data:/opt/grobid/grobid-home
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8070/api/isalive"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - app-network
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    environment:
+      - GROBID_URL=http://grobid:8070
+      - PYTHONPATH=/app
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    restart: unless-stopped
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - GROBID_URL=http://grobid:8070
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - app-network
+
+volumes:
+  grobid_data:
+
+networks:
+  app-network:
+    driver: bridge
+

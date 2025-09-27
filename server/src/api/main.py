@@ -1,7 +1,11 @@
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from loguru import logger
 import sys
+import asyncio
+import uuid
+import time
 from contextlib import asynccontextmanager
 
 from ..config import settings
@@ -46,12 +50,29 @@ async def lifespan(app: FastAPI):
     
     try:
         logger.info("Initializing utilities...")
-        pdf_extractor = PDFReferenceExtractor()
-        word_processor = WordDocumentProcessor()
+        
+        # Initialize file handler first (fastest)
         file_handler = FileHandler()
+        logger.info("✅ File handler initialized")
+        
+        # Initialize GROBID client
         grobid_client = GROBIDClient()
+        logger.info("✅ GROBID client initialized")
+        
+        # Initialize processors in background
+        logger.info("Initializing PDF and Word processors...")
+        pdf_extractor = PDFReferenceExtractor()
+        logger.info("✅ PDF processor initialized")
+        
+        word_processor = WordDocumentProcessor()
+        logger.info("✅ Word processor initialized")
+        
+        # Initialize enhanced parser last (most complex)
+        logger.info("Initializing enhanced parser...")
         enhanced_parser = EnhancedReferenceParser()
-        logger.info("Utilities initialized successfully")
+        logger.info("✅ Enhanced parser initialized")
+        
+        logger.info("🎉 All utilities initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize utilities: {str(e)}")
         raise
@@ -122,13 +143,12 @@ async def health_check():
     )
 
 
-@app.post("/upload-pdf", response_model=APIResponse)
+@app.post("/upload-pdf")
 async def upload_pdf(
     file: UploadFile = File(...),
     process_references: bool = Form(True),
     validate_all: bool = Form(True),
-    paper_type: str = Form("auto"),
-    use_ml: bool = Form(True)
+    paper_type: str = Form("auto")
 ):
     try:
         if not file_handler or not pdf_extractor or not word_processor or not enhanced_parser:
@@ -152,11 +172,11 @@ async def upload_pdf(
         try:
             if file_type == 'pdf':
                 processing_result = await pdf_extractor.process_pdf_with_extraction(
-                    file_path, paper_type, use_ml
+                    file_path, paper_type
                 )
             elif file_type == 'word':
                 processing_result = await word_processor.process_word_document(
-                    file_path, paper_type, use_ml
+                    file_path, paper_type
                 )
             else:
                 raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_type}")
@@ -194,7 +214,6 @@ async def upload_pdf(
 
                         parsed_ref = await enhanced_parser.parse_reference_enhanced(
                             ref_text,
-                            use_ollama=use_ml,
                             enable_api_enrichment=True
                         )
 
@@ -286,11 +305,280 @@ async def upload_pdf(
         )
 
 
+async def process_file_with_progress(
+    file_path: str,
+    file_type: str,
+    paper_type: str,
+    process_references: bool,
+    enhanced_parser,
+    pdf_extractor,
+    word_processor
+):
+    """Process file with progress updates for streaming response"""
+    
+    start_time = time.time()
+    processing_start_time = start_time
+    
+    # Step 1: Document processing
+    yield {
+        "type": "progress",
+        "data": {
+            "job_id": str(uuid.uuid4()),
+            "status": "processing",
+            "progress": 10,
+            "current_step": "Extracting references from document",
+            "message": "Analyzing document structure and extracting reference sections"
+        }
+    }
+    
+    if file_type == 'pdf':
+        processing_result = await pdf_extractor.process_pdf_with_extraction(file_path, paper_type)
+    elif file_type == 'word':
+        processing_result = await word_processor.process_word_document(file_path, paper_type)
+    else:
+        raise ValueError(f"Unsupported file type: {file_type}")
+
+    if not processing_result["success"]:
+        yield {
+            "type": "error",
+            "message": f"Document processing failed: {processing_result['error']}"
+        }
+        return
+
+    references = processing_result["references"]
+    if not references:
+        yield {
+            "type": "error",
+            "message": f"No references found in {file_type.upper()} document"
+        }
+        return
+
+    # Step 2: Reference processing
+    yield {
+        "type": "progress",
+        "data": {
+            "job_id": str(uuid.uuid4()),
+            "status": "processing",
+            "progress": 30,
+            "current_step": "Processing references",
+            "message": f"Processing {len(references)} references with AI parsing and API enrichment",
+            "total_references": len(references),
+            "processed_references": 0
+        }
+    }
+
+    processing_results = []
+    if process_references and enhanced_parser:
+        for i, ref in enumerate(references):
+            try:
+                if isinstance(ref, dict) and "raw" in ref:
+                    ref_text = ref["raw"]
+                elif isinstance(ref, str):
+                    ref_text = ref
+                else:
+                    ref_text = str(ref)
+
+                # Update progress
+                progress_percent = 30 + (i / len(references)) * 60
+                
+                yield {
+                    "type": "progress",
+                    "data": {
+                        "job_id": str(uuid.uuid4()),
+                        "status": "processing",
+                        "progress": int(progress_percent),
+                        "current_step": "Processing references",
+                        "message": f"Processing reference {i+1} of {len(references)}",
+                        "total_references": len(references),
+                        "processed_references": i
+                    }
+                }
+
+                parsed_ref = await enhanced_parser.parse_reference_enhanced(
+                    ref_text,
+                    enable_api_enrichment=True
+                )
+
+                tagged_output = enhanced_parser.generate_tagged_output(parsed_ref, i)
+
+                processing_results.append({
+                    "index": i,
+                    "original_text": ref_text,
+                    "parser_used": parsed_ref.get("parser_used", "unknown"),
+                    "api_enrichment_used": parsed_ref.get("api_enrichment_used", False),
+                    "enrichment_sources": parsed_ref.get("enrichment_sources", []),
+                    "extracted_fields": {
+                        "family_names": parsed_ref.get("family_names", []),
+                        "given_names": parsed_ref.get("given_names", []),
+                        "year": parsed_ref.get("year"),
+                        "title": parsed_ref.get("title"),
+                        "journal": parsed_ref.get("journal"),
+                        "doi": parsed_ref.get("doi"),
+                        "pages": parsed_ref.get("pages"),
+                        "publisher": parsed_ref.get("publisher"),
+                        "url": parsed_ref.get("url"),
+                        "abstract": parsed_ref.get("abstract")
+                    },
+                    "quality_metrics": {
+                        "quality_improvement": parsed_ref.get("quality_improvement", 0),
+                        "final_quality_score": parsed_ref.get("final_quality_score", 0)
+                    },
+                    "missing_fields": parsed_ref.get("missing_fields", []),
+                    "tagged_output": tagged_output,
+                    "flagging_analysis": parsed_ref.get("flagging_analysis", {}),
+                    "comparison_analysis": parsed_ref.get("conflict_analysis", {}),
+                    "doi_metadata": parsed_ref.get("doi_metadata", {})
+                })
+                
+                
+            except Exception as e:
+                if isinstance(ref, dict) and "raw" in ref:
+                    ref_text = ref["raw"]
+                elif isinstance(ref, str):
+                    ref_text = ref
+                else:
+                    ref_text = str(ref)
+
+                processing_results.append({
+                    "index": i,
+                    "original_text": ref_text,
+                    "parser_used": "error",
+                    "api_enrichment_used": False,
+                    "error": str(e)
+                })
+
+    # Step 3: Finalizing results
+    yield {
+        "type": "progress",
+        "data": {
+            "job_id": str(uuid.uuid4()),
+            "status": "processing",
+            "progress": 95,
+            "current_step": "Finalizing results",
+            "message": "Compiling processing results and generating summary",
+            "total_references": len(references),
+            "processed_references": len(references)
+        }
+    }
+
+    successful_processing = len([r for r in processing_results if "error" not in r])
+    total_extracted_fields = sum(len([v for v in r.get("extracted_fields", {}).values() if v]) for r in processing_results if "error" not in r)
+    total_missing_fields = sum(len(r.get("missing_fields", [])) for r in processing_results if "error" not in r)
+    enriched_count = len([r for r in processing_results if r.get("api_enrichment_used", False)])
+
+    result = APIResponse(
+        success=True,
+        message=f"{file_type.upper()} document processed successfully. Found {len(references)} references, processed {successful_processing} successfully.",
+        data={
+            "file_info": {
+                "filename": "processed_file",
+                "size": 0,
+                "type": file_type,
+                "references_found": len(references),
+                "successfully_processed": successful_processing
+            },
+            "paper_type": paper_type,
+            "summary": {
+                "total_references": len(references),
+                "successfully_processed": successful_processing,
+                "total_extracted_fields": total_extracted_fields,
+                "total_missing_fields": total_missing_fields,
+                "enriched_count": enriched_count
+            },
+            "processing_results": processing_results
+        }
+    )
+
+    # Send completion event
+    completion_event = {
+        "type": "complete",
+        "data": result
+    }
+    logger.info(f"🎉 Sending completion event with {len(processing_results)} results")
+    yield completion_event
+    
+    # Send a final confirmation to ensure frontend receives the data
+    yield {
+        "type": "final",
+        "message": "Processing completed successfully"
+    }
+
+
+@app.post("/upload-pdf-stream")
+async def upload_pdf_stream(
+    file: UploadFile = File(...),
+    process_references: bool = Form(True),
+    validate_all: bool = Form(True),
+    paper_type: str = Form("auto")
+):
+    """Streaming version of upload endpoint for large files"""
+    try:
+        if not file_handler or not pdf_extractor or not word_processor or not enhanced_parser:
+            raise HTTPException(status_code=500, detail="Processors not initialized")
+        
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No file provided")
+        
+        allowed_extensions = {'.pdf', '.docx', '.doc'}
+        file_extension = '.' + file.filename.split('.')[-1].lower()
+        
+        if file_extension not in allowed_extensions:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Unsupported file type. Allowed types: {', '.join(allowed_extensions)}"
+            )
+        
+        file_path = await file_handler.save_uploaded_file(file)
+        file_type = file_handler.get_file_type(file_path)
+        
+        async def generate():
+            try:
+                async for progress_update in process_file_with_progress(
+                    file_path, file_type, paper_type, process_references,
+                    enhanced_parser, pdf_extractor, word_processor
+                ):
+                    logger.info(f"📤 Streaming event: {progress_update.get('type', 'unknown')}")
+                    yield f"data: {progress_update}\n\n"
+                    
+                    # Only cleanup after we've sent the complete event
+                    if progress_update.get("type") == "complete":
+                        logger.info("✅ Complete event sent, waiting for stream to finish...")
+                        # Give a moment for the frontend to receive the data
+                        await asyncio.sleep(1)
+                        break
+                        
+            except Exception as e:
+                logger.error(f"❌ Streaming error: {str(e)}")
+                # Cleanup on error
+                file_handler.cleanup_file(file_path)
+                raise
+            finally:
+                # Cleanup after streaming is complete
+                logger.info("🧹 Cleaning up file after stream completion")
+                file_handler.cleanup_file(file_path)
+        
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "*",
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Streaming upload error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
+
+
 @app.post("/extract-references-only", response_model=APIResponse)
 async def extract_references_only(
     file: UploadFile = File(...),
-    paper_type: str = Form("auto"),
-    use_ml: bool = Form(True)
+    paper_type: str = Form("auto")
 ):
     try:
         if not file_handler or not pdf_extractor or not word_processor or not enhanced_parser:
@@ -314,11 +602,11 @@ async def extract_references_only(
         try:
             if file_type == 'pdf':
                 processing_result = await pdf_extractor.process_pdf_with_extraction(
-                    file_path, paper_type, use_ml
+                    file_path, paper_type
                 )
             elif file_type == 'word':
                 processing_result = await word_processor.process_word_document(
-                    file_path, paper_type, use_ml
+                    file_path, paper_type
                 )
             else:
                 raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_type}")

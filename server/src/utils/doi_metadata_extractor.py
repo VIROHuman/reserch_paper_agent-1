@@ -89,7 +89,7 @@ class DOIMetadataExtractor:
             async with httpx.AsyncClient() as client:
                 url = f"https://api.crossref.org/works/{doi}"
                 headers = {
-                    "User-Agent": "ResearchPaperAgent/1.0 (mailto:your-email@example.com)",
+                    "User-Agent": "ResearchPaperAgent/1.0 (mailto:user@example.com)",
                     "Accept": "application/json"
                 }
                 
@@ -113,7 +113,7 @@ class DOIMetadataExtractor:
             async with httpx.AsyncClient() as client:
                 url = f"https://api.openalex.org/works/doi:{doi}"
                 headers = {
-                    "User-Agent": "ResearchPaperAgent/1.0 (mailto:your-email@example.com)",
+                    "User-Agent": "ResearchPaperAgent/1.0 (mailto:user@example.com)",
                     "Accept": "application/json"
                 }
                 
@@ -140,7 +140,7 @@ class DOIMetadataExtractor:
                 url = f"https://api.unpaywall.org/v2/{doi}"
                 params = {"email": email}
                 headers = {
-                    "User-Agent": "ResearchPaperAgent/1.0 (mailto:your-email@example.com)",
+                    "User-Agent": "ResearchPaperAgent/1.0 (mailto:user@example.com)",
                     "Accept": "application/json"
                 }
                 

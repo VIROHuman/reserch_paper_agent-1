@@ -71,38 +71,110 @@ class SimpleReferenceParser:
         return result
     
     def _extract_authors(self, text: str) -> List[Dict[str, str]]:
-        """Extract author names from reference text"""
+        """Extract author names from reference text with improved patterns"""
         authors = []
         
-        # Pattern 1: Last, F. or Last, F.M. format
-        pattern1 = r'([A-Z][a-z]+),?\s*([A-Z]\.?(?:\s*[A-Z]\.?)*)'
+        # More specific patterns that require proper author context
+        # Pattern 1: Last, F. or Last, F.M. format - must be at start or after proper context
+        pattern1 = r'(?:^|\s)([A-Z][a-z]{2,}),\s*([A-Z]\.(?:\s*[A-Z]\.)*)(?=\s|$)'
         matches1 = re.findall(pattern1, text)
         
         for surname, given in matches1:
-            authors.append({
-                "surname": surname.strip(),
-                "given": given.strip().replace('.', '').replace(' ', '')
-            })
-        
-        # Pattern 2: F. Last format (if no pattern1 matches)
-        if not authors:
-            pattern2 = r'([A-Z]\.?\s*[A-Z]?\.?)\s+([A-Z][a-z]+)'
-            matches2 = re.findall(pattern2, text)
-            
-            for given, surname in matches2:
+            # Validate that this looks like a real author name
+            if self._is_valid_author_name(surname, given, text):
                 authors.append({
                     "surname": surname.strip(),
                     "given": given.strip().replace('.', '').replace(' ', '')
                 })
         
-        # Pattern 3: Multiple authors separated by commas
+        # Pattern 2: F. Last format - more specific context
+        if not authors:
+            pattern2 = r'(?:^|\s)([A-Z]\.(?:\s*[A-Z]\.)*)\s+([A-Z][a-z]{2,})(?=\s|$)'
+            matches2 = re.findall(pattern2, text)
+            
+            for given, surname in matches2:
+                if self._is_valid_author_name(surname, given, text):
+                    authors.append({
+                        "surname": surname.strip(),
+                        "given": given.strip().replace('.', '').replace(' ', '')
+                    })
+        
+        # Pattern 3: Handle multiple authors separated by semicolons or "and"
         if len(authors) > 1:
             # Check for "et al." pattern
             if 'et al' in text.lower():
                 # Keep only first few authors
                 authors = authors[:3]
         
+        # Final validation: remove any authors that appear to be from the title
+        authors = self._filter_title_words(authors, text)
+        
         return authors
+    
+    def _is_valid_author_name(self, surname: str, given: str, full_text: str) -> bool:
+        """Validate if a name candidate is actually an author name"""
+        # Check minimum length requirements
+        if len(surname) < 3 or len(given.strip('.')) < 1:
+            return False
+        
+        # Common title words that should not be author names
+        title_words = {
+            'health', 'care', 'blockchain', 'revolution', 'sweeps', 'offering',
+            'possibility', 'much', 'needed', 'data', 'solution', 'reaction',
+            'system', 'technology', 'digital', 'innovation', 'development',
+            'research', 'study', 'analysis', 'approach', 'method', 'model',
+            'framework', 'algorithm', 'network', 'platform', 'application'
+        }
+        
+        # Don't accept common title words as surnames
+        if surname.lower() in title_words:
+            return False
+        
+        # Check if the surname appears in a title-like context
+        # Look for patterns like "Title, Journal" where the surname might be part of title
+        title_patterns = [
+            r'[A-Z][^,]*' + re.escape(surname) + r'[^,]*,',  # Title, surname, something
+            r'[A-Z][^.]*' + re.escape(surname) + r'[^.]*\.',  # Title. surname. something
+        ]
+        
+        for pattern in title_patterns:
+            if re.search(pattern, full_text, re.IGNORECASE):
+                return False
+        
+        return True
+    
+    def _filter_title_words(self, authors: List[Dict[str, str]], full_text: str) -> List[Dict[str, str]]:
+        """Filter out author candidates that are likely title words"""
+        filtered_authors = []
+        
+        # Extract potential title section (before year or journal indicators)
+        year_match = re.search(r'\b(19|20)\d{2}\b', full_text)
+        title_section = full_text[:year_match.start()] if year_match else full_text
+        
+        for author in authors:
+            surname = author['surname']
+            
+            # Skip if surname appears in title section with title-like context
+            if self._appears_in_title_context(surname, title_section):
+                continue
+                
+            filtered_authors.append(author)
+        
+        return filtered_authors
+    
+    def _appears_in_title_context(self, surname: str, title_section: str) -> bool:
+        """Check if a surname appears in title-like context"""
+        # Look for patterns where the surname is part of a title phrase
+        title_context_patterns = [
+            r'[A-Z][a-z]*\s+' + re.escape(surname) + r'\s+[A-Z][a-z]*',  # Word Surname Word
+            r'[A-Z][a-z]*\s+' + re.escape(surname) + r'[,:]',  # Word Surname, or Word Surname:
+        ]
+        
+        for pattern in title_context_patterns:
+            if re.search(pattern, title_section):
+                return True
+        
+        return False
     
     def _extract_title(self, text: str, authors: List[Dict[str, str]]) -> Optional[str]:
         """Extract title from reference text"""
@@ -146,20 +218,24 @@ class SimpleReferenceParser:
         # Look for italicized text (often journal names)
         # This is a simplified approach - in real PDFs, formatting info is lost
         
-        # Common journal patterns
+        # Enhanced journal patterns
         journal_patterns = [
-            r'In:\s*([^,]+)',  # "In: Conference Name"
-            r'([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+\d{4}',  # Journal Name 2020
+            r'In:\s*([^,.]{5,})',  # "In: Conference Name"
+            r'([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*[,.]\s*\d{4}',  # Journal Name, 2020
             r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*\.\s*\d{4}',  # Journal Name. 2020
+            r'([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*vol',  # Journal Name, vol
+            r'([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*pp',  # Journal Name, pp
+            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*\(\d{4}\)',  # Journal Name (2020)
         ]
         
         for pattern in journal_patterns:
             match = re.search(pattern, text)
             if match:
                 journal = match.group(1).strip()
-                # Clean up
-                journal = re.sub(r'[.,;]$', '', journal)
-                if len(journal) > 3:  # Reasonable journal name length
+                # Clean up common artifacts
+                journal = re.sub(r'^[,.\s]+', '', journal)
+                journal = re.sub(r'[,.\s]+$', '', journal)
+                if len(journal) > 5 and not journal.lower().startswith(('vol', 'pp', 'p.')):
                     return journal
         
         return None

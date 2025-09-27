@@ -20,7 +20,7 @@ interface FileValidationError {
 }
 
 interface FileUploadSectionProps {
-  onFileProcess: (file: File) => void
+  onFileProcess: (file: File, useStreaming?: boolean) => void
 }
 
 export function FileUploadSection({ onFileProcess }: FileUploadSectionProps) {
@@ -264,7 +264,7 @@ export function FileUploadSection({ onFileProcess }: FileUploadSectionProps) {
                 className="w-full" 
                 size="lg" 
                 disabled={isUploading}
-                onClick={() => uploadedFile && onFileProcess(uploadedFile.file)}
+                onClick={() => uploadedFile && onFileProcess(uploadedFile.file, true)}
               >
                 {isUploading ? (
                   <>

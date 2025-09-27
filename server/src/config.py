@@ -6,7 +6,7 @@ class Settings:
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         self.crossref_api_key = os.getenv("CROSSREF_API_KEY")
         self.semantic_scholar_api_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY")
-        self.unpaywall_email = os.getenv("UNPAYWALL_EMAIL", "bhargavraj8651@gmail.com")
+        self.unpaywall_email = os.getenv("UNPAYWALL_EMAIL", "user@example.com")
         self.debug = os.getenv("DEBUG", "True").lower() == "true"
         self.log_level = os.getenv("LOG_LEVEL", "INFO")
         self.host = os.getenv("HOST", "0.0.0.0")
@@ -15,5 +15,11 @@ class Settings:
         self.crossref_base_url = "https://api.crossref.org"
         self.openalex_base_url = "https://api.openalex.org"
         self.semantic_scholar_base_url = "https://api.semanticscholar.org/graph/v1"
-        self.grobid_base_url = "http://localhost:8070"
+        self.grobid_base_url = os.getenv("GROBID_URL", "http://localhost:8070")
+        
+        # API timeout and retry settings
+        self.api_timeout = int(os.getenv("API_TIMEOUT", "30"))
+        self.api_retry_count = int(os.getenv("API_RETRY_COUNT", "3"))
+        self.api_retry_delay = float(os.getenv("API_RETRY_DELAY", "2.0"))
+        self.rate_limit_delay = float(os.getenv("RATE_LIMIT_DELAY", "1.5"))
 settings = Settings()

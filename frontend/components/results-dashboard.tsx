@@ -38,9 +38,10 @@ interface FileInfo {
 interface ResultsDashboardProps {
   data: any
   onNewFile: () => void
+  onViewReferences?: () => void
 }
 
-export function ResultsDashboard({ data, onNewFile }: ResultsDashboardProps) {
+export function ResultsDashboard({ data, onNewFile, onViewReferences }: ResultsDashboardProps) {
   const [activeTab, setActiveTab] = useState("overview")
 
   if (!data) {
@@ -91,9 +92,6 @@ export function ResultsDashboard({ data, onNewFile }: ResultsDashboardProps) {
                 Upload and process a research paper to see detailed reference analysis and quality metrics
               </p>
             </div>
-            <Button variant="outline" onClick={() => setHasResults(true)} className="mt-4">
-              View Demo Results
-            </Button>
           </div>
         </CardContent>
       </Card>
@@ -112,7 +110,7 @@ export function ResultsDashboard({ data, onNewFile }: ResultsDashboardProps) {
             <RefreshCw className="h-4 w-4 mr-2" />
             Process New File
           </Button>
-          <Button variant="outline" size="sm">
+          <Button variant="outline" size="sm" onClick={onViewReferences}>
             <Eye className="h-4 w-4 mr-2" />
             View References
           </Button>
@@ -191,7 +189,7 @@ export function ResultsDashboard({ data, onNewFile }: ResultsDashboardProps) {
             <CardContent className="space-y-4">
               <div className="flex items-center justify-between">
                 <span className="text-sm text-muted-foreground">Reference Quality</span>
-                <Badge variant="secondary" className="bg-success/10 text-success">
+                <Badge variant="secondary" className="bg-success/10 text-success min-w-[3rem] h-6 flex items-center justify-center">
                   {stats.qualityScore}%
                 </Badge>
               </div>

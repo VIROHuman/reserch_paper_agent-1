@@ -58,113 +58,40 @@ interface ReferenceData {
   error?: string
 }
 
-const mockReferences: ReferenceData[] = [
-  {
-    index: 1,
-    originalText:
-      "Smith, J., & Johnson, M. (2023). Machine Learning Applications in Healthcare: A Comprehensive Review. Nature Medicine, 29(4), 123-135. doi:10.1038/s41591-023-02456-7",
-    parserUsed: "enhanced",
-    apiEnrichmentUsed: true,
-    enrichmentSources: ["crossref", "openalex"],
-    extractedFields: {
-      familyNames: ["Smith", "Johnson"],
-      givenNames: ["J", "M"],
-      year: 2023,
-      title: "Machine Learning Applications in Healthcare: A Comprehensive Review",
-      journal: "Nature Medicine",
-      doi: "10.1038/s41591-023-02456-7",
-      pages: "123-135",
-      publisher: "Nature Publishing Group",
-      url: "https://www.nature.com/articles/s41591-023-02456-7",
-      abstract:
-        "Machine learning applications in healthcare have shown remarkable progress in recent years, transforming diagnostic accuracy and treatment personalization...",
-    },
-    qualityMetrics: {
-      qualityImprovement: 25,
-      finalQualityScore: 95,
-    },
-    missingFields: [],
-    taggedOutput:
-      '<reference id="ref1"><authors><author><surname>Smith</surname><given-names>J</given-names></author><author><surname>Johnson</surname><given-names>M</given-names></author></authors><year>2023</year><article-title>Machine Learning Applications in Healthcare: A Comprehensive Review</article-title><source>Nature Medicine</source><volume>29</volume><issue>4</issue><fpage>123</fpage><lpage>135</lpage><pub-id pub-id-type="doi">10.1038/s41591-023-02456-7</pub-id></reference>',
-    flaggingAnalysis: {
-      missingFields: [],
-      replacedFields: ["doi", "publisher"],
-      conflictedFields: [],
-      partialFields: [],
-      dataSourcesUsed: ["crossref", "openalex"],
-    },
-  },
-  {
-    index: 2,
-    originalText:
-      "Brown, A. et al. Deep Learning for Medical Image Analysis. IEEE Trans Med Imaging, vol. 42, pp. 567-580, 2022.",
-    parserUsed: "standard",
-    apiEnrichmentUsed: true,
-    enrichmentSources: ["semantic_scholar"],
-    extractedFields: {
-      familyNames: ["Brown"],
-      givenNames: ["A"],
-      year: 2022,
-      title: "Deep Learning for Medical Image Analysis",
-      journal: "IEEE Transactions on Medical Imaging",
-      doi: "",
-      pages: "567-580",
-      publisher: "IEEE",
-      url: "",
-      abstract: "",
-    },
-    qualityMetrics: {
-      qualityImprovement: 15,
-      finalQualityScore: 78,
-    },
-    missingFields: ["doi", "url", "abstract", "given_names"],
-    taggedOutput:
-      '<reference id="ref2"><authors><author><surname>Brown</surname><given-names>A</given-names></author></authors><year>2022</year><article-title>Deep Learning for Medical Image Analysis</article-title><source>IEEE Transactions on Medical Imaging</source><volume>42</volume><fpage>567</fpage><lpage>580</lpage></reference>',
-    flaggingAnalysis: {
-      missingFields: ["doi", "url", "abstract"],
-      replacedFields: ["journal"],
-      conflictedFields: [],
-      partialFields: ["given_names"],
-      dataSourcesUsed: ["semantic_scholar"],
-    },
-  },
-  {
-    index: 3,
-    originalText: "Wilson, K. (2021). AI Ethics in Clinical Decision Making. Medical Ethics Journal.",
-    parserUsed: "basic",
-    apiEnrichmentUsed: false,
-    enrichmentSources: [],
-    extractedFields: {
-      familyNames: ["Wilson"],
-      givenNames: ["K"],
-      year: 2021,
-      title: "AI Ethics in Clinical Decision Making",
-      journal: "Medical Ethics Journal",
-      doi: "",
-      pages: "",
-      publisher: "",
-      url: "",
-      abstract: "",
-    },
-    qualityMetrics: {
-      qualityImprovement: 0,
-      finalQualityScore: 45,
-    },
-    missingFields: ["doi", "pages", "publisher", "url", "abstract"],
-    taggedOutput:
-      '<reference id="ref3"><authors><author><surname>Wilson</surname><given-names>K</given-names></author></authors><year>2021</year><article-title>AI Ethics in Clinical Decision Making</article-title><source>Medical Ethics Journal</source></reference>',
-    flaggingAnalysis: {
-      missingFields: ["doi", "pages", "publisher", "url", "abstract"],
-      replacedFields: [],
-      conflictedFields: [],
-      partialFields: [],
-      dataSourcesUsed: [],
-    },
-  },
-]
 
 interface ReferenceCardsDisplayProps {
   data: any[]
+}
+
+// Helper function to normalize API response to expected interface format
+function normalizeReference(ref: any): ReferenceData {
+  return {
+    index: ref.index || 0,
+    originalText: ref.originalText || ref.original_text || "",
+    parserUsed: ref.parserUsed || ref.parser_used || "unknown",
+    apiEnrichmentUsed: ref.apiEnrichmentUsed || ref.api_enrichment_used || false,
+    enrichmentSources: ref.enrichmentSources || ref.enrichment_sources || [],
+    extractedFields: {
+      familyNames: ref.extractedFields?.familyNames || ref.extracted_fields?.family_names || [],
+      givenNames: ref.extractedFields?.givenNames || ref.extracted_fields?.given_names || [],
+      year: ref.extractedFields?.year || ref.extracted_fields?.year || 0,
+      title: ref.extractedFields?.title || ref.extracted_fields?.title || "",
+      journal: ref.extractedFields?.journal || ref.extracted_fields?.journal || "",
+      doi: ref.extractedFields?.doi || ref.extracted_fields?.doi || "",
+      pages: ref.extractedFields?.pages || ref.extracted_fields?.pages || "",
+      publisher: ref.extractedFields?.publisher || ref.extracted_fields?.publisher || "",
+      url: ref.extractedFields?.url || ref.extracted_fields?.url || "",
+      abstract: ref.extractedFields?.abstract || ref.extracted_fields?.abstract || "",
+    },
+    qualityMetrics: {
+      qualityImprovement: ref.qualityMetrics?.qualityImprovement || ref.quality_metrics?.quality_improvement || 0,
+      finalQualityScore: ref.qualityMetrics?.finalQualityScore || ref.quality_metrics?.final_quality_score || 0,
+    },
+    missingFields: ref.missingFields || ref.missing_fields || [],
+    taggedOutput: ref.taggedOutput || ref.tagged_output || "",
+    flaggingAnalysis: ref.flaggingAnalysis || ref.flagging_analysis || {},
+    error: ref.error
+  }
 }
 
 export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
@@ -173,11 +100,32 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
   const [filterStatus, setFilterStatus] = useState("all")
   const [showOriginalText, setShowOriginalText] = useState<Set<number>>(new Set())
 
+
   if (!data || data.length === 0) {
     return (
       <Card>
         <CardContent className="p-6 text-center">
           <p className="text-muted-foreground">No reference data available</p>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  // Normalize and filter references
+  const normalizedReferences = data.map(ref => normalizeReference(ref))
+  
+  const validReferences = normalizedReferences.filter((ref) => {
+    return ref && 
+      typeof ref === 'object' && 
+      ref.index !== undefined &&
+      (ref.originalText || ref.extractedFields || ref.error)
+  })
+
+  if (validReferences.length === 0) {
+    return (
+      <Card>
+        <CardContent className="p-6 text-center">
+          <p className="text-muted-foreground">No valid reference data available</p>
         </CardContent>
       </Card>
     )
@@ -207,48 +155,54 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
     navigator.clipboard.writeText(text)
   }
 
-  const getStatusIcon = (qualityScore: number, hasError?: boolean) => {
-    if (hasError) return <XCircle className="h-4 w-4 text-destructive" />
-    if (qualityScore >= 80) return <CheckCircle className="h-4 w-4 text-success" />
-    if (qualityScore >= 60) return <AlertTriangle className="h-4 w-4 text-yellow-500" />
+  const getStatusIcon = (qualityScore: number | undefined, hasError?: boolean) => {
+    if (hasError || qualityScore === undefined) return <XCircle className="h-4 w-4 text-destructive" />
+    const percentageScore = Math.round((qualityScore || 0) * 100)
+    if (percentageScore >= 80) return <CheckCircle className="h-4 w-4 text-success" />
+    if (percentageScore >= 60) return <AlertTriangle className="h-4 w-4 text-yellow-500" />
     return <XCircle className="h-4 w-4 text-destructive" />
   }
 
-  const getStatusColor = (qualityScore: number, hasError?: boolean) => {
-    if (hasError) return "border-destructive/20 bg-destructive/5"
-    if (qualityScore >= 80) return "border-success/20 bg-success/5"
-    if (qualityScore >= 60) return "border-yellow-500/20 bg-yellow-500/5"
+  const getStatusColor = (qualityScore: number | undefined, hasError?: boolean) => {
+    if (hasError || qualityScore === undefined) return "border-destructive/20 bg-destructive/5"
+    const percentageScore = Math.round((qualityScore || 0) * 100)
+    if (percentageScore >= 80) return "border-success/20 bg-success/5"
+    if (percentageScore >= 60) return "border-yellow-500/20 bg-yellow-500/5"
     return "border-destructive/20 bg-destructive/5"
   }
 
-  const filteredReferences = mockReferences.filter((ref) => {
-    const matchesSearch =
-      ref.extractedFields.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      ref.extractedFields.familyNames.some((name) => name.toLowerCase().includes(searchTerm.toLowerCase()))
+  const filteredReferences = validReferences.filter((ref) => {
+    // More robust search that includes original text
+    const matchesSearch = searchTerm === "" || 
+      ref.extractedFields?.title?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      ref.extractedFields?.familyNames?.some((name) => name.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      ref.originalText?.toLowerCase().includes(searchTerm.toLowerCase())
 
     const matchesFilter =
       filterStatus === "all" ||
-      (filterStatus === "high" && ref.qualityMetrics.finalQualityScore >= 80) ||
+      (filterStatus === "high" && !ref.error && (ref.qualityMetrics?.finalQualityScore || 0) >= 0.8) ||
       (filterStatus === "medium" &&
-        ref.qualityMetrics.finalQualityScore >= 60 &&
-        ref.qualityMetrics.finalQualityScore < 80) ||
-      (filterStatus === "low" && ref.qualityMetrics.finalQualityScore < 60)
+        !ref.error &&
+        (ref.qualityMetrics?.finalQualityScore || 0) >= 0.6 &&
+        (ref.qualityMetrics?.finalQualityScore || 0) < 0.8) ||
+      (filterStatus === "low" && !ref.error && (ref.qualityMetrics?.finalQualityScore || 0) < 0.6)
 
     return matchesSearch && matchesFilter
   })
+
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-semibold flex items-center gap-2">
           <BookOpen className="h-5 w-5 text-primary" />
-          Reference Analysis ({mockReferences.length} references)
+          Reference Analysis ({validReferences.length} references)
         </h2>
         <div className="flex items-center gap-2">
           <Button
             variant="outline"
             size="sm"
-            onClick={() => setExpandedCards(new Set(mockReferences.map((r) => r.index)))}
+            onClick={() => setExpandedCards(new Set(validReferences.map((r) => r.index)))}
           >
             Expand All
           </Button>
@@ -286,7 +240,7 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
         {filteredReferences.map((reference) => (
           <Card
             key={reference.index}
-            className={`transition-all duration-200 ${getStatusColor(reference.qualityMetrics.finalQualityScore, !!reference.error)}`}
+            className={`transition-all duration-200 ${getStatusColor(reference.qualityMetrics?.finalQualityScore, !!reference.error)}`}
           >
             <Collapsible open={expandedCards.has(reference.index)} onOpenChange={() => toggleCard(reference.index)}>
               <CollapsibleTrigger asChild>
@@ -294,23 +248,29 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <div className="flex items-center gap-2">
-                        {getStatusIcon(reference.qualityMetrics.finalQualityScore, !!reference.error)}
+                        {getStatusIcon(reference.qualityMetrics?.finalQualityScore, !!reference.error)}
                         <Badge variant="outline" className="text-xs">
                           Ref {reference.index}
                         </Badge>
                       </div>
                       <div className="flex-1 min-w-0">
                         <h3 className="font-medium text-left truncate">
-                          {reference.extractedFields.title || "Untitled Reference"}
+                          {reference.error 
+                            ? reference.originalText?.substring(0, 100) + (reference.originalText?.length > 100 ? "..." : "") || "Reference with parsing error"
+                            : reference.extractedFields?.title || "Untitled Reference"
+                          }
                         </h3>
                         <p className="text-sm text-muted-foreground text-left">
-                          {reference.extractedFields.familyNames.join(", ")} ({reference.extractedFields.year})
+                          {reference.error 
+                            ? "Parsing Error"
+                            : `${reference.extractedFields?.familyNames?.join(", ") || "Unknown"} (${reference.extractedFields?.year || "Unknown"})`
+                          }
                         </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <Badge variant="secondary" className="text-xs">
-                        {reference.qualityMetrics.finalQualityScore}%
+                      <Badge variant="secondary" className="text-xs min-w-[3rem] h-6 flex items-center justify-center">
+                        {reference.error ? "Error" : `${Math.round((reference.qualityMetrics?.finalQualityScore || 0) * 100)}%`}
                       </Badge>
                       {expandedCards.has(reference.index) ? (
                         <ChevronUp className="h-4 w-4 text-muted-foreground" />
@@ -329,15 +289,15 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-medium">Quality Score</span>
                       <div className="flex items-center gap-2">
-                        {reference.qualityMetrics.qualityImprovement > 0 && (
-                          <Badge variant="outline" className="text-xs bg-primary/10 text-primary">
-                            +{reference.qualityMetrics.qualityImprovement}% improved
+                        {(reference.qualityMetrics?.qualityImprovement || 0) > 0 && (
+                          <Badge variant="outline" className="text-xs bg-primary/10 text-primary min-w-fit h-6 flex items-center justify-center">
+                            +{Math.round((reference.qualityMetrics?.qualityImprovement || 0) * 100)}% improved
                           </Badge>
                         )}
-                        <Badge variant="secondary">{reference.qualityMetrics.finalQualityScore}%</Badge>
+                        <Badge variant="secondary" className="min-w-[3rem] h-6 flex items-center justify-center">{Math.round((reference.qualityMetrics?.finalQualityScore || 0) * 100)}%</Badge>
                       </div>
                     </div>
-                    <Progress value={reference.qualityMetrics.finalQualityScore} className="w-full h-2" />
+                    <Progress value={(reference.qualityMetrics?.finalQualityScore || 0) * 100} className="w-full h-2" />
                   </div>
 
                   <Separator />
@@ -367,11 +327,11 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                     </div>
                     {showOriginalText.has(reference.index) && (
                       <div className="p-3 bg-muted/30 rounded-lg border border-dashed">
-                        <p className="text-sm font-mono text-muted-foreground">{reference.originalText}</p>
+                        <p className="text-sm font-mono text-muted-foreground">{reference.originalText || "No original text available"}</p>
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => copyToClipboard(reference.originalText)}
+                          onClick={() => copyToClipboard(reference.originalText || "")}
                           className="mt-2 text-xs"
                         >
                           <Copy className="h-3 w-3 mr-1" />
@@ -392,24 +352,27 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                         <div className="flex justify-between">
                           <span className="text-xs text-muted-foreground">Authors:</span>
                           <span className="text-xs font-medium">
-                            {reference.extractedFields.familyNames
-                              .map((name, i) => `${name}, ${reference.extractedFields.givenNames[i] || "?"}`)
-                              .join("; ")}
+                            {reference.extractedFields?.familyNames?.length > 0 
+                              ? reference.extractedFields.familyNames
+                                  .map((name, i) => `${name}, ${reference.extractedFields?.givenNames?.[i] || "?"}`)
+                                  .join("; ")
+                              : "N/A"
+                            }
                           </span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-xs text-muted-foreground">Year:</span>
-                          <span className="text-xs font-medium">{reference.extractedFields.year}</span>
+                          <span className="text-xs font-medium">{reference.extractedFields?.year || "N/A"}</span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-xs text-muted-foreground">Journal:</span>
                           <span className="text-xs font-medium truncate max-w-32">
-                            {reference.extractedFields.journal}
+                            {reference.extractedFields?.journal || "N/A"}
                           </span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-xs text-muted-foreground">Pages:</span>
-                          <span className="text-xs font-medium">{reference.extractedFields.pages || "N/A"}</span>
+                          <span className="text-xs font-medium">{reference.extractedFields?.pages || "N/A"}</span>
                         </div>
                       </div>
                       <div className="space-y-2">
@@ -417,9 +380,9 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                           <span className="text-xs text-muted-foreground">DOI:</span>
                           <div className="flex items-center gap-1">
                             <span className="text-xs font-medium truncate max-w-32">
-                              {reference.extractedFields.doi || "N/A"}
+                              {reference.extractedFields?.doi || "N/A"}
                             </span>
-                            {reference.extractedFields.doi && (
+                            {reference.extractedFields?.doi && (
                               <Button variant="ghost" size="sm" className="h-4 w-4 p-0">
                                 <ExternalLink className="h-3 w-3" />
                               </Button>
@@ -429,16 +392,16 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                         <div className="flex justify-between">
                           <span className="text-xs text-muted-foreground">Publisher:</span>
                           <span className="text-xs font-medium truncate max-w-32">
-                            {reference.extractedFields.publisher || "N/A"}
+                            {reference.extractedFields?.publisher || "N/A"}
                           </span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-xs text-muted-foreground">URL:</span>
                           <div className="flex items-center gap-1">
                             <span className="text-xs font-medium">
-                              {reference.extractedFields.url ? "Available" : "N/A"}
+                              {reference.extractedFields?.url ? "Available" : "N/A"}
                             </span>
-                            {reference.extractedFields.url && (
+                            {reference.extractedFields?.url && (
                               <Button variant="ghost" size="sm" className="h-4 w-4 p-0">
                                 <ExternalLink className="h-3 w-3" />
                               </Button>
@@ -448,7 +411,7 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                         <div className="flex justify-between">
                           <span className="text-xs text-muted-foreground">Abstract:</span>
                           <span className="text-xs font-medium">
-                            {reference.extractedFields.abstract ? "Available" : "N/A"}
+                            {reference.extractedFields?.abstract ? "Available" : "N/A"}
                           </span>
                         </div>
                       </div>
@@ -456,7 +419,7 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                   </div>
 
                   {/* Missing Fields */}
-                  {reference.missingFields.length > 0 && (
+                  {reference.missingFields?.length > 0 && (
                     <div className="space-y-2">
                       <h4 className="text-sm font-medium text-yellow-600">Missing Fields</h4>
                       <div className="flex flex-wrap gap-1">
@@ -470,7 +433,7 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                   )}
 
                   {/* API Enrichment Info */}
-                  {reference.apiEnrichmentUsed && (
+                  {reference.apiEnrichmentUsed && reference.enrichmentSources?.length > 0 && (
                     <div className="space-y-2">
                       <h4 className="text-sm font-medium flex items-center gap-2">
                         <Star className="h-4 w-4 text-primary" />
@@ -493,7 +456,7 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => copyToClipboard(reference.taggedOutput)}
+                        onClick={() => copyToClipboard(reference.taggedOutput || "")}
                         className="text-xs"
                       >
                         <Copy className="h-3 w-3 mr-1" />
@@ -502,7 +465,7 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                     </div>
                     <div className="p-3 bg-muted/30 rounded-lg border border-dashed max-h-32 overflow-y-auto">
                       <pre className="text-xs font-mono text-muted-foreground whitespace-pre-wrap">
-                        {reference.taggedOutput}
+                        {reference.taggedOutput || "No tagged output available"}
                       </pre>
                     </div>
                   </div>

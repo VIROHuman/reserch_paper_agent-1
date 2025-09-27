@@ -57,8 +57,8 @@ export function useFileProcessing() {
       setProgress(null)
 
       if (options.useStreaming) {
-        // Use streaming upload for better progress tracking
-        const response = await apiClient.uploadWithProgress(
+        // Use async job processing for better reliability
+        const response = await apiClient.uploadWithAsyncJob(
           file,
           options.processReferences ?? true,
           options.validateAll ?? true,

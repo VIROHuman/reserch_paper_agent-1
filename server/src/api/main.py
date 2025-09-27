@@ -6,6 +6,7 @@ import sys
 import asyncio
 import uuid
 import time
+import os
 from contextlib import asynccontextmanager
 
 from ..config import settings
@@ -13,13 +14,16 @@ from ..models.schemas import (
     ReferenceValidationRequest, 
     TaggingRequest,
     APIResponse,
-    ReferenceData
+    ReferenceData,
+    JobStatus,
+    JobSubmissionResponse
 )
 from ..utils.api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient, GROBIDClient
 from ..utils.pdf_processor import PDFReferenceExtractor
 from ..utils.word_processor import WordDocumentProcessor
 from ..utils.file_handler import FileHandler
 from ..utils.enhanced_parser import EnhancedReferenceParser
+from ..utils.job_manager import job_manager
 import xml.etree.ElementTree as ET
 
 logger.remove()
@@ -502,6 +506,240 @@ async def process_file_with_progress(
         "type": "final",
         "message": "Processing completed successfully"
     }
+
+
+@app.post("/upload-pdf-async")
+async def upload_pdf_async(
+    file: UploadFile = File(...),
+    process_references: bool = Form(True),
+    validate_all: bool = Form(True),
+    paper_type: str = Form("auto")
+):
+    """Upload file and start async processing - returns 202 with job ID"""
+    try:
+        if not file_handler or not pdf_extractor or not word_processor or not enhanced_parser:
+            raise HTTPException(status_code=500, detail="Processors not initialized")
+        
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No file provided")
+        
+        allowed_extensions = {'.pdf', '.docx', '.doc'}
+        file_extension = '.' + file.filename.split('.')[-1].lower()
+        
+        if file_extension not in allowed_extensions:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Unsupported file type. Allowed types: {', '.join(allowed_extensions)}"
+            )
+        
+        # Save file and create job
+        file_path = await file_handler.save_uploaded_file(file)
+        file_type = file_handler.get_file_type(file_path)
+        job_id = job_manager.create_job(file_path)
+        
+        # Start async processing
+        asyncio.create_task(process_file_async(
+            job_id, file_path, file_type, paper_type, process_references,
+            enhanced_parser, pdf_extractor, word_processor
+        ))
+        
+        # Return 202 with job ID
+        return APIResponse(
+            success=True,
+            message="File uploaded successfully. Processing started.",
+            data=JobSubmissionResponse(
+                success=True,
+                message="Processing started",
+                job_id=job_id,
+                status="pending",
+                estimated_completion_time=300  # 5 minutes estimate
+            )
+        )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in async upload: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.get("/job-status/{job_id}")
+async def get_job_status(job_id: str):
+    """Get job status by ID"""
+    job = job_manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return APIResponse(
+        success=True,
+        message="Job status retrieved",
+        data=job
+    )
+
+
+async def process_file_async(
+    job_id: str,
+    file_path: str,
+    file_type: str,
+    paper_type: str,
+    process_references: bool,
+    enhanced_parser,
+    pdf_extractor,
+    word_processor
+):
+    """Async file processing function"""
+    try:
+        job_manager.update_job_status(
+            job_id, "processing",
+            progress=10,
+            current_step="Extracting references from document",
+            message="Analyzing document structure and extracting reference sections"
+        )
+        
+        # Process document
+        if file_type == 'pdf':
+            processing_result = await pdf_extractor.process_pdf_with_extraction(
+                file_path, paper_type
+            )
+        elif file_type == 'word':
+            processing_result = await word_processor.process_word_document(
+                file_path, paper_type
+            )
+        else:
+            raise ValueError(f"Unsupported file type: {file_type}")
+        
+        references = processing_result.get("references", [])
+        
+        job_manager.update_job_status(
+            job_id, "processing",
+            progress=30,
+            current_step="Processing references",
+            message=f"Processing {len(references)} references with AI parsing and API enrichment",
+        )
+        
+        # Process references
+        processing_results = []
+        if process_references and enhanced_parser:
+            for i, ref in enumerate(references):
+                try:
+                    if isinstance(ref, dict) and "raw" in ref:
+                        ref_text = ref["raw"]
+                    elif isinstance(ref, str):
+                        ref_text = ref
+                    else:
+                        ref_text = str(ref)
+
+                    parsed_ref = await enhanced_parser.parse_reference_enhanced(
+                        ref_text,
+                        enable_api_enrichment=True
+                    )
+
+                    tagged_output = enhanced_parser.generate_tagged_output(parsed_ref, i)
+
+                    processing_results.append({
+                        "index": i,
+                        "original_text": ref_text,
+                        "parser_used": parsed_ref.get("parser_used", "unknown"),
+                        "api_enrichment_used": parsed_ref.get("api_enrichment_used", False),
+                        "enrichment_sources": parsed_ref.get("enrichment_sources", []),
+                        "extracted_fields": {
+                            "family_names": parsed_ref.get("family_names", []),
+                            "given_names": parsed_ref.get("given_names", []),
+                            "year": parsed_ref.get("year"),
+                            "title": parsed_ref.get("title"),
+                            "journal": parsed_ref.get("journal"),
+                            "doi": parsed_ref.get("doi"),
+                            "pages": parsed_ref.get("pages"),
+                            "publisher": parsed_ref.get("publisher"),
+                            "url": parsed_ref.get("url"),
+                            "abstract": parsed_ref.get("abstract")
+                        },
+                        "quality_metrics": {
+                            "quality_improvement": parsed_ref.get("quality_improvement", 0),
+                            "final_quality_score": parsed_ref.get("final_quality_score", 0)
+                        },
+                        "missing_fields": parsed_ref.get("missing_fields", []),
+                        "tagged_output": tagged_output,
+                        "flagging_analysis": parsed_ref.get("flagging_analysis", {}),
+                        "comparison_analysis": parsed_ref.get("conflict_analysis", {}),
+                        "doi_metadata": parsed_ref.get("doi_metadata", {})
+                    })
+                    
+                    # Update progress
+                    progress_percent = 30 + (i / len(references)) * 60
+                    job_manager.update_job_status(
+                        job_id, "processing",
+                        progress=int(progress_percent),
+                        current_step="Processing references",
+                        message=f"Processing reference {i+1} of {len(references)}"
+                    )
+                    
+                except Exception as e:
+                    if isinstance(ref, dict) and "raw" in ref:
+                        ref_text = ref["raw"]
+                    elif isinstance(ref, str):
+                        ref_text = ref
+                    else:
+                        ref_text = str(ref)
+
+                    processing_results.append({
+                        "index": i,
+                        "original_text": ref_text,
+                        "parser_used": "error",
+                        "api_enrichment_used": False,
+                        "error": str(e)
+                    })
+        
+        # Calculate summary
+        successful_processing = len([r for r in processing_results if "error" not in r])
+        total_extracted_fields = sum(len([v for v in r.get("extracted_fields", {}).values() if v]) for r in processing_results if "error" not in r)
+        total_missing_fields = sum(len(r.get("missing_fields", [])) for r in processing_results if "error" not in r)
+        enriched_count = len([r for r in processing_results if r.get("api_enrichment_used", False)])
+        
+        # Complete job
+        result = {
+            "file_info": {
+                "filename": os.path.basename(file_path),
+                "size": os.path.getsize(file_path),
+                "type": file_type,
+                "references_found": len(references),
+                "successfully_processed": successful_processing
+            },
+            "paper_type": paper_type,
+            "summary": {
+                "total_references": len(references),
+                "successfully_processed": successful_processing,
+                "total_extracted_fields": total_extracted_fields,
+                "total_missing_fields": total_missing_fields,
+                "enriched_count": enriched_count
+            },
+            "processing_results": processing_results,
+            "file_path": file_path  # Include for cleanup
+        }
+        
+        job_manager.update_job_status(
+            job_id, "completed",
+            progress=100,
+            current_step="Completed",
+            message=f"Processing completed successfully. Found {len(references)} references, processed {successful_processing} successfully.",
+            result=result
+        )
+        
+        # Schedule gentle cleanup
+        job_manager.cleanup_job_file(job_id)
+        
+    except Exception as e:
+        logger.error(f"Async processing error for job {job_id}: {str(e)}")
+        job_manager.update_job_status(
+            job_id, "failed",
+            progress=0,
+            current_step="Failed",
+            message=f"Processing failed: {str(e)}",
+            error=str(e)
+        )
+        # Cleanup on error
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 
 @app.post("/upload-pdf-stream")

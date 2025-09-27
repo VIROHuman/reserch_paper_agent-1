@@ -119,6 +119,29 @@ class APIResponse(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.now)
 
 
+class JobStatus(BaseModel):
+    """Job status for async processing"""
+    job_id: str
+    status: str  # "pending", "processing", "completed", "failed"
+    progress: int = 0
+    current_step: str = ""
+    message: str = ""
+    created_at: datetime = Field(default_factory=datetime.now)
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class JobSubmissionResponse(BaseModel):
+    """Response for job submission"""
+    success: bool
+    message: str
+    job_id: str
+    status: str
+    estimated_completion_time: Optional[int] = None  # seconds
+
+
 class CrossRefResponse(BaseModel):
     """CrossRef API response structure"""
     status: str

@@ -16,9 +16,9 @@ QUALITY_WEIGHTS = {
 
 # Minimum quality thresholds
 MIN_QUALITY_THRESHOLDS = {
-    "enrichment_trigger": 0.85,    # Trigger API enrichment below this score
-    "acceptable_quality": 0.60,    # Consider acceptable above this score
-    "minimum_quality": 0.35        # Minimum score even with basic info
+    "enrichment_trigger": 0.80,    # Trigger API enrichment below this score
+    "acceptable_quality": 0.55,    # Consider acceptable above this score
+    "minimum_quality": 0.30        # Minimum score even with basic info
 }
 
 # Field length requirements (more lenient)

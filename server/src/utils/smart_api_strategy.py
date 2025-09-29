@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient
+from .text_normalizer import text_normalizer
 
 
 class APIProvider(Enum):
@@ -57,9 +58,9 @@ class SmartAPIStrategy:
             APIProvider.DOAJ
         ]
         
-        self.min_quality_score = 0.7
-        self.min_confidence = 0.6
-        self.max_api_calls = 3  # Restored original value
+        self.min_quality_score = 0.7  # Higher threshold to avoid false positives
+        self.min_confidence = 0.6     # Higher threshold to avoid false positives
+        self.max_api_calls = 3        # Conservative number of API calls
         
         logger.info("Smart API Strategy initialized")
     
@@ -108,12 +109,10 @@ class SmartAPIStrategy:
                         continue
                     
                     api_results.append(result)
-                    enriched_ref = self._merge_api_result(enriched_ref, result)
                     enrichment_sources.append(provider.value)
                     
-                    current_quality = self._calculate_data_quality(enriched_ref)
-                    if current_quality.overall_confidence >= self.min_confidence:
-                        break
+                    # Don't merge immediately - collect all results for adjudication
+                    
                 else:
                     # Check if this was a timeout (result is None but no exception)
                     timeout_occurred = True
@@ -123,6 +122,17 @@ class SmartAPIStrategy:
             except Exception as e:
                 logger.warning(f"{provider.value} API error: {e}")
                 continue
+        
+        # Apply multi-source adjudication if we have multiple results
+        if len(api_results) > 1:
+            logger.info(f"Applying multi-source adjudication for {len(api_results)} sources")
+            enriched_ref = self._apply_multi_source_adjudication(enriched_ref, api_results)
+        elif len(api_results) == 1:
+            # Single source - merge directly
+            enriched_ref = self._merge_api_result(enriched_ref, api_results[0])
+        
+        # Calculate final quality
+        current_quality = self._calculate_data_quality(enriched_ref)
         
         final_quality = self._calculate_data_quality(enriched_ref)
         final_author_analysis = self._analyze_authors(enriched_ref)
@@ -136,28 +146,34 @@ class SmartAPIStrategy:
         return enriched_ref
     
     def _create_optimized_search_query(self, parsed_ref: Dict[str, Any], original_text: str) -> Optional[str]:
-        """Create optimized search query with better strategies"""
+        """Create optimized search query with better strategies and blocking keys"""
         query_strategies = []
         
+        # Normalize data for better matching
+        normalized_title = text_normalizer.normalize_title(parsed_ref.get("title", ""))
+        normalized_authors = [text_normalizer.normalize_text(name) for name in parsed_ref.get("family_names", [])]
+        normalized_journal = text_normalizer.normalize_journal_venue(parsed_ref.get("journal", ""))
+        
         # Strategy 1: Title + First Author + Year (most reliable)
-        if parsed_ref.get("title") and parsed_ref.get("family_names") and parsed_ref.get("year"):
-            query_strategies.append(f"{parsed_ref['title']} {parsed_ref['family_names'][0]} {parsed_ref['year']}")
+        if normalized_title.get('basic') and normalized_authors and parsed_ref.get("year"):
+            query_strategies.append(f"{normalized_title['basic']} {normalized_authors[0]} {parsed_ref['year']}")
         
         # Strategy 2: Title + First Author
-        if parsed_ref.get("title") and parsed_ref.get("family_names"):
-            query_strategies.append(f"{parsed_ref['title']} {parsed_ref['family_names'][0]}")
+        if normalized_title.get('basic') and normalized_authors:
+            query_strategies.append(f"{normalized_title['basic']} {normalized_authors[0]}")
         
         # Strategy 3: First Author + Year + Journal
-        if parsed_ref.get("family_names") and parsed_ref.get("year") and parsed_ref.get("journal"):
-            query_strategies.append(f"{parsed_ref['family_names'][0]} {parsed_ref['year']} {parsed_ref['journal']}")
+        if normalized_authors and parsed_ref.get("year") and normalized_journal.get('basic'):
+            query_strategies.append(f"{normalized_authors[0]} {parsed_ref['year']} {normalized_journal['basic']}")
         
-        # Strategy 4: Title only
-        if parsed_ref.get("title"):
-            query_strategies.append(parsed_ref["title"])
+        # Strategy 4: Normalized title only
+        if normalized_title.get('basic'):
+            query_strategies.append(normalized_title['basic'])
         
         # Strategy 5: Original text (fallback)
         if original_text and len(original_text) > 10:
-            query_strategies.append(original_text[:200])
+            normalized_original = text_normalizer.normalize_text(original_text[:200])
+            query_strategies.append(normalized_original)
         
         # Return the best strategy (first one that exists)
         for strategy in query_strategies:
@@ -170,46 +186,85 @@ class SmartAPIStrategy:
     def _calculate_data_quality(self, parsed_ref: Dict[str, Any]) -> QualityMetrics:
         """Calculate comprehensive data quality metrics with improved scoring"""
         
-        # More lenient title scoring - partial credit for shorter titles
+        # Enhanced title scoring with better validation
         title = parsed_ref.get("title", "")
-        if title and len(title) > 20:
-            title_quality = 1.0
-        elif title and len(title) > 10:
-            title_quality = 0.8
-        elif title and len(title) > 5:
-            title_quality = 0.6
-        else:
-            title_quality = 0.0
+        title_quality = 0.0
+        if title:
+            title_len = len(title.strip())
+            # Check for title quality indicators
+            has_capitalization = any(c.isupper() for c in title)
+            has_lowercase = any(c.islower() for c in title)
+            has_spaces = ' ' in title
+            not_all_caps = not title.isupper()
+            
+            if title_len > 30 and has_capitalization and has_lowercase and has_spaces and not_all_caps:
+                title_quality = 1.0
+            elif title_len > 20 and has_capitalization and has_lowercase:
+                title_quality = 0.9
+            elif title_len > 15 and has_capitalization:
+                title_quality = 0.8
+            elif title_len > 10:
+                title_quality = 0.6
+            elif title_len > 5:
+                title_quality = 0.4
         
-        # Improved author quality calculation
+        # Enhanced author quality calculation
         author_quality = 0.0
         author_analysis = self._analyze_authors(parsed_ref)
         
         if author_analysis["has_authors"]:
             completeness_score = author_analysis["completeness_ratio"]
             quality_score = author_analysis["quality_score"]
-            # Give partial credit even for incomplete authors
-            author_quality = max(0.3, (completeness_score + quality_score) / 2.0)
+            author_count = author_analysis["author_count"]
+            
+            # Base quality from completeness and individual author quality
+            base_quality = (completeness_score + quality_score) / 2.0
+            
+            # Bonus for multiple authors (indicates academic paper)
+            if author_count > 1:
+                base_quality = min(1.0, base_quality + 0.1)
+            
+            # Bonus for complete author information
+            if completeness_score > 0.8:
+                base_quality = min(1.0, base_quality + 0.1)
+            
+            author_quality = max(0.2, base_quality)
         
-        # More lenient year scoring
+        # Enhanced year scoring with validation
         year = parsed_ref.get("year")
-        if year and str(year).isdigit() and 1800 <= int(year) <= 2030:
-            year_quality = 1.0
-        else:
-            year_quality = 0.0
+        year_quality = 0.0
+        if year:
+            try:
+                year_int = int(str(year))
+                if 1800 <= year_int <= 2030:
+                    year_quality = 1.0
+                elif 1700 <= year_int <= 2040:
+                    year_quality = 0.8
+            except (ValueError, TypeError):
+                year_quality = 0.0
         
-        # More lenient journal scoring
+        # Enhanced journal scoring
         journal = parsed_ref.get("journal", "")
-        if journal and len(journal) > 10:
-            journal_quality = 1.0
-        elif journal and len(journal) > 5:
-            journal_quality = 0.8
-        elif journal and len(journal) > 3:
-            journal_quality = 0.6
-        else:
-            journal_quality = 0.0
+        journal_quality = 0.0
+        if journal:
+            journal_len = len(journal.strip())
+            # Check for journal quality indicators
+            has_capitalization = any(c.isupper() for c in journal)
+            has_lowercase = any(c.islower() for c in journal)
+            has_spaces = ' ' in journal
+            
+            if journal_len > 15 and has_capitalization and has_lowercase and has_spaces:
+                journal_quality = 1.0
+            elif journal_len > 10 and has_capitalization:
+                journal_quality = 0.9
+            elif journal_len > 8:
+                journal_quality = 0.8
+            elif journal_len > 5:
+                journal_quality = 0.6
+            elif journal_len > 3:
+                journal_quality = 0.4
         
-        # DOI gives bonus points
+        # DOI gives significant bonus points
         doi_quality = 1.0 if parsed_ref.get("doi") else 0.0
         
         # Pages are nice to have but not critical
@@ -221,16 +276,20 @@ class SmartAPIStrategy:
         # URL gives bonus
         url_quality = 0.6 if parsed_ref.get("url") else 0.0
         
-        # Updated weights - more balanced
+        # Abstract gives bonus
+        abstract_quality = 0.5 if parsed_ref.get("abstract") else 0.0
+        
+        # Updated weights - more balanced and accurate
         weights = {
-            "title": 0.30,      # Increased - most important
-            "authors": 0.25,    # High importance
+            "title": 0.35,      # Most important - identifies the work
+            "authors": 0.25,    # High importance - identifies creators
             "year": 0.15,       # Important for validation
             "journal": 0.15,    # Important for context
-            "doi": 0.08,        # Bonus points
-            "pages": 0.03,      # Nice to have
-            "publisher": 0.02,  # Bonus
-            "url": 0.02         # Bonus
+            "doi": 0.05,        # Bonus points
+            "pages": 0.02,      # Nice to have
+            "publisher": 0.015, # Bonus
+            "url": 0.01,        # Bonus
+            "abstract": 0.005   # Bonus
         }
         
         overall_confidence = (
@@ -241,12 +300,15 @@ class SmartAPIStrategy:
             doi_quality * weights["doi"] +
             pages_quality * weights["pages"] +
             publisher_quality * weights["publisher"] +
-            url_quality * weights["url"]
+            url_quality * weights["url"] +
+            abstract_quality * weights["abstract"]
         )
         
         # Ensure minimum quality score if we have basic info
-        if title_quality > 0 and (author_quality > 0 or year_quality > 0):
-            overall_confidence = max(overall_confidence, 0.4)
+        if title_quality > 0.5 and (author_quality > 0.3 or year_quality > 0.5):
+            overall_confidence = max(overall_confidence, 0.5)
+        elif title_quality > 0.3 and (author_quality > 0.2 or year_quality > 0.3):
+            overall_confidence = max(overall_confidence, 0.3)
         
         return QualityMetrics(
             title_similarity=title_quality,
@@ -262,41 +324,270 @@ class SmartAPIStrategy:
         if force_enrichment:
             return True
         
-        # More aggressive enrichment - lower threshold
-        if quality.overall_confidence < 0.85:  # Higher threshold for enrichment
-            logger.info(f"Quality below threshold: {quality.overall_confidence:.2f} < 0.85")
+        # Conservative enrichment - higher threshold
+        if quality.overall_confidence < 0.80:  # Higher threshold to avoid false positives
+            logger.info(f"Quality below threshold: {quality.overall_confidence:.2f} < 0.80")
             return True
         
         # Check for missing or incomplete critical fields
         critical_issues = []
         
-        # Title issues
+        # Title issues - conservative threshold
         title = parsed_ref.get("title", "")
-        if not title or len(title) < 10:
+        if not title or len(title) < 10:  # Conservative threshold
             critical_issues.append("title")
         
-        # Author issues
-        if not parsed_ref.get("family_names"):
+        # Author issues - conservative threshold
+        family_names = parsed_ref.get("family_names", [])
+        if not family_names or len(family_names) == 0:
+            critical_issues.append("authors")
+        elif len(family_names) == 1 and len(family_names[0]) < 4:  # Check quality
             critical_issues.append("authors")
         
-        # Year issues
-        if not parsed_ref.get("year"):
+        # Year issues - conservative threshold
+        year = parsed_ref.get("year")
+        if not year or not str(year).isdigit() or int(year) < 1800 or int(year) > 2030:
             critical_issues.append("year")
         
         if critical_issues:
             logger.info(f"Missing/incomplete critical fields: {critical_issues}")
             return True
         
-        # Enrich if missing DOI (valuable for validation)
+        # Only enrich for DOI and journal if we have good base data
         if not parsed_ref.get("doi"):
-            logger.info("Missing DOI - enriching")
+            # Only try to get DOI if we have good title and authors
+            if (parsed_ref.get("title") and len(parsed_ref.get("title", "")) > 15 and
+                parsed_ref.get("family_names") and len(parsed_ref.get("family_names", [])) > 0):
+                logger.info("Missing DOI but have good base data - enriching")
+                return True
+        
+        # Enrich if missing journal but have good base data
+        journal = parsed_ref.get("journal", "")
+        if not journal or len(journal) < 5:  # Conservative threshold
+            if (parsed_ref.get("title") and len(parsed_ref.get("title", "")) > 15 and
+                parsed_ref.get("family_names") and len(parsed_ref.get("family_names", [])) > 0):
+                logger.info("Missing/incomplete journal but have good base data - enriching")
+                return True
+        
+        # Only enrich if we have very few fields filled AND they are high quality
+        filled_fields = sum(1 for field in ["title", "family_names", "year", "journal", "doi"] 
+                          if parsed_ref.get(field))
+        if filled_fields < 2:  # Less than 2 critical fields
+            logger.info(f"Only {filled_fields} critical fields filled - enriching")
             return True
         
-        # Enrich if missing journal or journal is too short
-        journal = parsed_ref.get("journal", "")
-        if not journal or len(journal) < 5:
-            logger.info("Missing/incomplete journal - enriching")
+        return False
+    
+    def _apply_multi_source_adjudication(self, enriched_ref: Dict[str, Any], api_results: List[APIResult]) -> Dict[str, Any]:
+        """Apply multi-source adjudication to resolve conflicts and choose best data"""
+        if not api_results:
+            return enriched_ref
+        
+        logger.info(f"Starting adjudication with {len(api_results)} sources")
+        
+        # Group results by provider for analysis
+        provider_results = {}
+        for result in api_results:
+            provider_results[result.provider.value] = result
+        
+        # Adjudicate each field
+        adjudicated_fields = {}
+        conflicts = []
+        
+        # Fields to adjudicate
+        fields_to_adjudicate = ['title', 'year', 'journal', 'doi', 'pages', 'publisher', 'url', 'abstract']
+        
+        for field in fields_to_adjudicate:
+            field_values = {}
+            field_confidences = {}
+            
+            # Collect values and confidences from all sources
+            for provider, result in provider_results.items():
+                if field in result.data and result.data[field]:
+                    field_values[provider] = result.data[field]
+                    field_confidences[provider] = result.confidence
+            
+            if not field_values:
+                continue
+            
+            # Apply adjudication logic
+            if len(field_values) == 1:
+                # Single source - use its value
+                provider = list(field_values.keys())[0]
+                adjudicated_fields[field] = field_values[provider]
+                logger.info(f"Field {field}: Single source ({provider})")
+            else:
+                # Multiple sources - apply adjudication rules
+                adjudicated_value, conflict_info = self._adjudicate_field(field, field_values, field_confidences, provider_results)
+                
+                if adjudicated_value:
+                    adjudicated_fields[field] = adjudicated_value
+                
+                if conflict_info:
+                    conflicts.append(conflict_info)
+        
+        # Adjudicate authors separately (more complex)
+        author_result = self._adjudicate_authors(provider_results)
+        if author_result:
+            adjudicated_fields.update(author_result)
+        
+        # Apply adjudicated results
+        for field, value in adjudicated_fields.items():
+            if not enriched_ref.get(field) or self._is_better_value(enriched_ref.get(field), value, field):
+                enriched_ref[field] = value
+                logger.info(f"Applied adjudicated {field}: {value}")
+        
+        # Store conflict information
+        if conflicts:
+            enriched_ref["adjudication_conflicts"] = conflicts
+            logger.warning(f"Found {len(conflicts)} conflicts during adjudication")
+        
+        return enriched_ref
+    
+    def _adjudicate_field(self, field: str, field_values: Dict[str, Any], field_confidences: Dict[str, float], provider_results: Dict[str, APIResult]) -> Tuple[Any, Optional[Dict]]:
+        """Adjudicate a single field across multiple sources"""
+        # Check for exact matches first
+        unique_values = set(str(v) for v in field_values.values())
+        if len(unique_values) == 1:
+            # All sources agree
+            return list(field_values.values())[0], None
+        
+        # Check for DOI exact matches (highest priority)
+        if field == 'doi':
+            doi_matches = {k: v for k, v in field_values.items() if v and str(v).startswith('10.')}
+            if doi_matches:
+                # Prefer CrossRef for DOIs
+                if 'crossref' in doi_matches:
+                    return doi_matches['crossref'], None
+                else:
+                    # Use the DOI with highest confidence
+                    best_provider = max(doi_matches.keys(), key=lambda k: field_confidences.get(k, 0))
+                    return doi_matches[best_provider], None
+        
+        # Check for year exact matches
+        if field == 'year':
+            year_matches = {k: v for k, v in field_values.items() if v and str(v).isdigit()}
+            if year_matches:
+                # Count occurrences of each year
+                year_counts = {}
+                for provider, year in year_matches.items():
+                    year_str = str(year)
+                    if year_str not in year_counts:
+                        year_counts[year_str] = []
+                    year_counts[year_str].append(provider)
+                
+                # Find most common year
+                most_common_year = max(year_counts.keys(), key=lambda y: len(year_counts[y]))
+                if len(year_counts[most_common_year]) > 1:
+                    # Multiple sources agree on year
+                    return most_common_year, None
+        
+        # For other fields, use confidence-weighted selection
+        # Prefer CrossRef for critical fields
+        if field in ['title', 'journal'] and 'crossref' in field_values:
+            crossref_confidence = field_confidences.get('crossref', 0)
+            other_confidences = [field_confidences.get(k, 0) for k in field_values.keys() if k != 'crossref']
+            
+            if other_confidences and crossref_confidence >= max(other_confidences):
+                return field_values['crossref'], None
+        
+        # Use highest confidence value
+        best_provider = max(field_values.keys(), key=lambda k: field_confidences.get(k, 0))
+        best_value = field_values[best_provider]
+        best_confidence = field_confidences.get(best_provider, 0)
+        
+        # Check if there's significant disagreement
+        other_confidences = [field_confidences.get(k, 0) for k in field_values.keys() if k != best_provider]
+        if other_confidences and best_confidence < max(other_confidences) * 1.2:  # Less than 20% better
+            conflict_info = {
+                'field': field,
+                'chosen_value': best_value,
+                'chosen_provider': best_provider,
+                'chosen_confidence': best_confidence,
+                'alternatives': [(k, v, field_confidences.get(k, 0)) for k, v in field_values.items() if k != best_provider]
+            }
+            return best_value, conflict_info
+        
+        return best_value, None
+    
+    def _adjudicate_authors(self, provider_results: Dict[str, APIResult]) -> Optional[Dict[str, Any]]:
+        """Adjudicate author information across sources"""
+        author_data = {}
+        
+        for provider, result in provider_results.items():
+            if result.data.get('family_names') and result.data.get('given_names'):
+                author_data[provider] = {
+                    'family_names': result.data['family_names'],
+                    'given_names': result.data['given_names'],
+                    'confidence': result.confidence
+                }
+        
+        if not author_data:
+            return None
+        
+        if len(author_data) == 1:
+            # Single source
+            provider = list(author_data.keys())[0]
+            return {
+                'family_names': author_data[provider]['family_names'],
+                'given_names': author_data[provider]['given_names']
+            }
+        
+        # Multiple sources - find consensus
+        # Prefer CrossRef for authors
+        if 'crossref' in author_data:
+            crossref_authors = author_data['crossref']
+            crossref_family = set(crossref_authors['family_names'])
+            
+            # Check if other sources have similar author sets
+            consensus_count = 1  # CrossRef counts as 1
+            for provider, data in author_data.items():
+                if provider != 'crossref':
+                    other_family = set(data['family_names'])
+                    # Check for significant overlap
+                    overlap = len(crossref_family & other_family)
+                    if overlap >= len(crossref_family) * 0.6:  # At least 60% overlap
+                        consensus_count += 1
+            
+            if consensus_count >= 2:  # At least 2 sources agree
+                return {
+                    'family_names': crossref_authors['family_names'],
+                    'given_names': crossref_authors['given_names']
+                }
+        
+        # No consensus - use highest confidence source
+        best_provider = max(author_data.keys(), key=lambda k: author_data[k]['confidence'])
+        best_data = author_data[best_provider]
+        
+        return {
+            'family_names': best_data['family_names'],
+            'given_names': best_data['given_names']
+        }
+    
+    def _is_better_value(self, original: Any, new_value: Any, field: str) -> bool:
+        """Determine if new value is better than original"""
+        if not new_value:
+            return False
+        
+        if not original:
             return True
+        
+        # For strings, prefer longer, more complete values
+        if isinstance(original, str) and isinstance(new_value, str):
+            # Special handling for different fields
+            if field == 'title':
+                return len(new_value) > len(original) * 1.1  # 10% longer
+            elif field == 'journal':
+                return len(new_value) > len(original) * 1.2  # 20% longer
+            elif field in ['doi', 'url']:
+                # Prefer more complete URLs/DOIs
+                return len(new_value) > len(original)
+            else:
+                return len(new_value) > len(original) * 1.2  # 20% longer
+        
+        # For lists (authors), prefer more authors
+        if isinstance(original, list) and isinstance(new_value, list):
+            return len(new_value) > len(original)
         
         return False
     
@@ -421,25 +712,40 @@ class SmartAPIStrategy:
             return None
     
     def _find_best_match_smart(self, parsed_ref: Dict[str, Any], api_results: List[Any]) -> Optional[Any]:
-        """Robust matching with acceptance gates and domain filtering"""
+        """Robust matching with blocking keys, acceptance gates, and domain filtering"""
         if not api_results:
             return None
         
+        # Create blocking key for efficient filtering
+        blocking_key = self._create_blocking_key(parsed_ref)
+        logger.info(f"Using blocking key: {blocking_key}")
+        
         best_match = None
         best_score = 0.0
+        candidates_checked = 0
         
         for result in api_results:
             if not hasattr(result, 'title') or not result.title:
                 continue
             
-            # Calculate title similarity (token Jaccard or cosine TF-IDF)
-            title_sim = self._calculate_similarity(
-                parsed_ref.get("title", ""), 
-                result.title
+            # Apply blocking filter first (most efficient)
+            if not self._passes_blocking_filter(parsed_ref, result, blocking_key):
+                continue
+            
+            candidates_checked += 1
+            
+            # Normalize titles for better comparison
+            parsed_title_norm = text_normalizer.normalize_title(parsed_ref.get("title", ""))
+            result_title_norm = text_normalizer.normalize_title(result.title)
+            
+            # Calculate title similarity using multiple methods
+            title_sim = self._calculate_enhanced_similarity(
+                parsed_title_norm, 
+                result_title_norm
             )
             
-            # Require title similarity ≥ 0.65
-            if title_sim < 0.65:
+            # Require title similarity ≥ 0.70 (balanced approach)
+            if title_sim < 0.70:
                 continue
             
             # Check year agreement within ±1
@@ -455,21 +761,9 @@ class SmartAPIStrategy:
             if not year_match:
                 continue
             
-            # Check author match - require at least one exact last-name match
-            author_match = False
-            if parsed_ref.get("family_names") and hasattr(result, 'authors') and result.authors:
-                original_authors = [name.lower().strip() for name in parsed_ref["family_names"]]
-                result_authors = []
-                for author in result.authors:
-                    if hasattr(author, 'surname') and author.surname:
-                        result_authors.append(author.surname.lower().strip())
-                    elif hasattr(author, 'full_name') and author.full_name:
-                        result_authors.append(author.full_name.split()[-1].lower().strip())
-                
-                if result_authors:
-                    author_match = len(set(original_authors) & set(result_authors)) > 0
-            
-            if not author_match:
+            # Enhanced author matching
+            author_match_score = self._calculate_author_match_score(parsed_ref, result)
+            if author_match_score < 0.5:  # Require at least 50% author overlap
                 continue
             
             # Domain whitelist check
@@ -478,15 +772,160 @@ class SmartAPIStrategy:
                 continue
             
             # Calculate composite match score
-            composite_score = self._calculate_composite_score(title_sim, year_match, author_match, result)
+            composite_score = self._calculate_composite_score(title_sim, year_match, author_match_score > 0.6, result)
             
-            # Only consider matches with score ≥ 0.60
-            if composite_score >= 0.60 and composite_score > best_score:
+            # Only consider matches with score ≥ 0.65 (balanced approach)
+            if composite_score >= 0.65 and composite_score > best_score:
                 best_score = composite_score
                 best_match = result
         
-        logger.info(f"Best match score: {best_score:.2f}")
+        logger.info(f"Checked {candidates_checked} candidates, best match score: {best_score:.2f}")
         return best_match
+    
+    def _create_blocking_key(self, parsed_ref: Dict[str, Any]) -> str:
+        """Create blocking key for efficient candidate filtering"""
+        return text_normalizer.create_blocking_key(
+            parsed_ref.get("family_names", []),
+            parsed_ref.get("year", ""),
+            parsed_ref.get("journal", "")
+        )
+    
+    def _passes_blocking_filter(self, parsed_ref: Dict[str, Any], result: Any, blocking_key: str) -> bool:
+        """Check if result passes blocking filter"""
+        try:
+            # Extract result data
+            result_authors = []
+            if hasattr(result, 'authors') and result.authors:
+                for author in result.authors:
+                    if hasattr(author, 'surname') and author.surname:
+                        result_authors.append(author.surname)
+                    elif hasattr(author, 'full_name') and author.full_name:
+                        result_authors.append(author.full_name.split()[-1])
+            
+            result_year = str(result.year) if hasattr(result, 'year') and result.year else ""
+            result_journal = result.journal if hasattr(result, 'journal') and result.journal else ""
+            
+            # Create result blocking key
+            result_blocking_key = text_normalizer.create_blocking_key(
+                result_authors, result_year, result_journal
+            )
+            
+            # Check if blocking keys match (allows some flexibility)
+            return self._blocking_keys_match(blocking_key, result_blocking_key)
+            
+        except Exception as e:
+            logger.warning(f"Blocking filter error: {e}")
+            return True  # If blocking fails, allow through
+    
+    def _blocking_keys_match(self, key1: str, key2: str) -> bool:
+        """Check if two blocking keys match (with some flexibility)"""
+        if not key1 or not key2:
+            return True  # If either is empty, don't block
+        
+        # Exact match
+        if key1 == key2:
+            return True
+        
+        # Split keys and check components
+        parts1 = key1.split('_')
+        parts2 = key2.split('_')
+        
+        if len(parts1) != len(parts2):
+            return False
+        
+        # Check each component with some flexibility
+        for i, (p1, p2) in enumerate(zip(parts1, parts2)):
+            if i == 0:  # Author name - must match exactly
+                if p1 != p2:
+                    return False
+            elif i == 1:  # Year - must match exactly
+                if p1 != p2:
+                    return False
+            elif i == 2:  # Venue - allow partial match
+                if not self._venue_components_match(p1, p2):
+                    return False
+        
+        return True
+    
+    def _venue_components_match(self, venue1: str, venue2: str) -> bool:
+        """Check if venue components match with some flexibility"""
+        if not venue1 or not venue2:
+            return True
+        
+        # Normalize venues
+        norm1 = text_normalizer.normalize_journal_venue(venue1)
+        norm2 = text_normalizer.normalize_journal_venue(venue2)
+        
+        # Check if any key terms overlap
+        terms1 = set(norm1.get('key_terms', '').split())
+        terms2 = set(norm2.get('key_terms', '').split())
+        
+        if not terms1 or not terms2:
+            return True  # If no terms, don't block
+        
+        overlap = len(terms1 & terms2)
+        return overlap > 0  # At least one term must overlap
+    
+    def _calculate_enhanced_similarity(self, title1_norm: Dict[str, str], title2_norm: Dict[str, str]) -> float:
+        """Calculate enhanced similarity using multiple normalization methods"""
+        similarities = []
+        
+        # Basic similarity
+        if title1_norm.get('basic') and title2_norm.get('basic'):
+            similarities.append(text_normalizer.calculate_similarity(
+                title1_norm['basic'], title2_norm['basic'], 'jaccard'
+            ))
+        
+        # No stopwords similarity
+        if title1_norm.get('no_stopwords') and title2_norm.get('no_stopwords'):
+            similarities.append(text_normalizer.calculate_similarity(
+                title1_norm['no_stopwords'], title2_norm['no_stopwords'], 'jaccard'
+            ))
+        
+        # Token-sorted similarity (order-independent)
+        if title1_norm.get('token_sorted') and title2_norm.get('token_sorted'):
+            similarities.append(text_normalizer.calculate_similarity(
+                title1_norm['token_sorted'], title2_norm['token_sorted'], 'jaccard'
+            ))
+        
+        # N-gram similarity
+        if title1_norm.get('bigrams') and title2_norm.get('bigrams'):
+            bigram_sim = len(title1_norm['bigrams'] & title2_norm['bigrams']) / max(
+                len(title1_norm['bigrams'] | title2_norm['bigrams']), 1
+            )
+            similarities.append(bigram_sim)
+        
+        return max(similarities) if similarities else 0.0
+    
+    def _calculate_author_match_score(self, parsed_ref: Dict[str, Any], result: Any) -> float:
+        """Calculate detailed author match score"""
+        if not parsed_ref.get("family_names") or not hasattr(result, 'authors') or not result.authors:
+            return 0.0
+        
+        # Normalize original authors
+        original_authors = [text_normalizer.normalize_text(name) for name in parsed_ref["family_names"]]
+        
+        # Extract and normalize result authors
+        result_authors = []
+        for author in result.authors:
+            if hasattr(author, 'surname') and author.surname:
+                result_authors.append(text_normalizer.normalize_text(author.surname))
+            elif hasattr(author, 'full_name') and author.full_name:
+                surname = author.full_name.split()[-1]
+                result_authors.append(text_normalizer.normalize_text(surname))
+        
+        if not result_authors:
+            return 0.0
+        
+        # Calculate overlap
+        original_set = set(original_authors)
+        result_set = set(result_authors)
+        
+        intersection = len(original_set & result_set)
+        union = len(original_set | result_set)
+        
+        # Return Jaccard similarity
+        return intersection / union if union > 0 else 0.0
     
     def _check_domain_whitelist(self, result) -> bool:
         """Check if result passes domain whitelist - disabled for general research support"""
@@ -656,9 +1095,9 @@ class SmartAPIStrategy:
             return merged
         
         elif 0.60 <= match_score < 0.80:
-            # Conservative merge: only DOI and external URL additions
-            logger.info(f"Conservative merge (score {match_score:.2f}): DOI/URL only")
-            for field in ["doi", "url"]:
+            # Conservative merge: DOI, URL, and non-critical fields
+            logger.info(f"Conservative merge (score {match_score:.2f}): DOI/URL and non-critical fields")
+            for field in ["doi", "url", "pages", "publisher", "abstract"]:
                 if not merged.get(field) and api_result.data.get(field):
                     merged[field] = api_result.data[field]
                     merged_fields.append(field)

@@ -44,6 +44,9 @@ interface ResultsDashboardProps {
 export function ResultsDashboard({ data, onNewFile, onViewReferences }: ResultsDashboardProps) {
   const [activeTab, setActiveTab] = useState("overview")
 
+  // Debug: Log the data structure to understand what we're receiving
+  console.log("ResultsDashboard data:", data)
+
   if (!data) {
     return (
       <Card>
@@ -54,14 +57,45 @@ export function ResultsDashboard({ data, onNewFile, onViewReferences }: ResultsD
     )
   }
 
+  // Calculate realistic stats from the actual data
+  // Handle different possible data structures
+  const references = data.processing_results || data.references || []
+  const totalReferences = references.length
+  
+  // Debug: Log references to understand the structure
+  console.log("References found:", totalReferences)
+  console.log("First reference:", references[0])
+  const successfullyProcessed = references.filter(ref => 
+    ref.status === "Verified" || ref.status === "Suspect" || !ref.error
+  ).length
+  const fieldsExtracted = references.reduce((total, ref) => {
+    if (ref.error) return total
+    const extractedFields = ref.extracted_fields || {}
+    return total + Object.values(extractedFields).filter(value => 
+      value && (Array.isArray(value) ? value.length > 0 : value.toString().trim() !== "")
+    ).length
+  }, 0)
+  const missingFields = references.reduce((total, ref) => 
+    total + (ref.missing_fields?.length || 0), 0
+  )
+  const apiEnriched = references.filter(ref => 
+    ref.api_enrichment_used
+  ).length
+  
+  // Calculate average quality score from individual reference confidence scores
+  const avgConfidence = references.length > 0 
+    ? references.reduce((sum, ref) => sum + (ref.confidence || 0), 0) / references.length
+    : 0
+  const qualityScore = Math.round(avgConfidence * 100)
+
   const stats: ProcessingStats = {
-    totalReferences: data.summary?.total_references || 0,
-    successfullyProcessed: data.summary?.successfully_processed || 0,
-    fieldsExtracted: data.summary?.total_extracted_fields || 0,
-    missingFields: data.summary?.total_missing_fields || 0,
-    apiEnriched: data.summary?.enriched_count || 0,
-    qualityScore: 85, // Calculate from processing results
-    processingTime: "2m 34s", // This would need to be tracked
+    totalReferences,
+    successfullyProcessed,
+    fieldsExtracted,
+    missingFields,
+    apiEnriched,
+    qualityScore,
+    processingTime: data.processing_time || "Unknown",
   }
 
   const fileInfo: FileInfo = {
@@ -223,13 +257,13 @@ export function ResultsDashboard({ data, onNewFile, onViewReferences }: ResultsD
                 <div className="flex justify-between items-center">
                   <span className="text-sm text-muted-foreground">Success Rate:</span>
                   <Badge variant="secondary" className="bg-success/10 text-success">
-                    {Math.round((stats.successfullyProcessed / stats.totalReferences) * 100)}%
+                    {stats.totalReferences > 0 ? Math.round((stats.successfullyProcessed / stats.totalReferences) * 100) : 0}%
                   </Badge>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-sm text-muted-foreground">API Enrichment:</span>
                   <Badge variant="secondary" className="bg-primary/10 text-primary">
-                    {Math.round((stats.apiEnriched / stats.totalReferences) * 100)}%
+                    {stats.totalReferences > 0 ? Math.round((stats.apiEnriched / stats.totalReferences) * 100) : 0}%
                   </Badge>
                 </div>
                 <div className="flex justify-between items-center">
@@ -239,7 +273,7 @@ export function ResultsDashboard({ data, onNewFile, onViewReferences }: ResultsD
                 <div className="flex justify-between items-center">
                   <span className="text-sm text-muted-foreground">Average Fields per Reference:</span>
                   <span className="text-sm font-medium">
-                    {Math.round(stats.fieldsExtracted / stats.successfullyProcessed)}
+                    {stats.successfullyProcessed > 0 ? Math.round(stats.fieldsExtracted / stats.successfullyProcessed) : 0}
                   </span>
                 </div>
               </CardContent>
@@ -251,34 +285,35 @@ export function ResultsDashboard({ data, onNewFile, onViewReferences }: ResultsD
               </CardHeader>
               <CardContent className="space-y-3">
                 <div className="grid grid-cols-2 gap-2">
-                  <div className="flex items-center gap-2 p-2 bg-success/10 rounded-md border border-success/20">
-                    <div className="w-2 h-2 bg-success rounded-full" />
-                    <span className="text-xs font-medium">CrossRef</span>
-                    <Badge variant="outline" className="ml-auto text-xs">
-                      28
-                    </Badge>
-                  </div>
-                  <div className="flex items-center gap-2 p-2 bg-success/10 rounded-md border border-success/20">
-                    <div className="w-2 h-2 bg-success rounded-full" />
-                    <span className="text-xs font-medium">OpenAlex</span>
-                    <Badge variant="outline" className="ml-auto text-xs">
-                      22
-                    </Badge>
-                  </div>
-                  <div className="flex items-center gap-2 p-2 bg-success/10 rounded-md border border-success/20">
-                    <div className="w-2 h-2 bg-success rounded-full" />
-                    <span className="text-xs font-medium">Semantic Scholar</span>
-                    <Badge variant="outline" className="ml-auto text-xs">
-                      18
-                    </Badge>
-                  </div>
-                  <div className="flex items-center gap-2 p-2 bg-success/10 rounded-md border border-success/20">
-                    <div className="w-2 h-2 bg-success rounded-full" />
-                    <span className="text-xs font-medium">DOAJ</span>
-                    <Badge variant="outline" className="ml-auto text-xs">
-                      12
-                    </Badge>
-                  </div>
+                  {(() => {
+                    // Count actual data sources used
+                    const sourceCounts = references.reduce((counts, ref) => {
+                      if (ref.error) return counts
+                      const sources = ref.enrichment_sources || []
+                      sources.forEach(source => {
+                        counts[source] = (counts[source] || 0) + 1
+                      })
+                      return counts
+                    }, {})
+                    
+                    const sources = [
+                      { name: "CrossRef", key: "crossref" },
+                      { name: "OpenAlex", key: "openalex" },
+                      { name: "Semantic Scholar", key: "semantic_scholar" },
+                      { name: "DOAJ", key: "doaj" },
+                      { name: "DOI", key: "DOI" }
+                    ]
+                    
+                    return sources.map(source => (
+                      <div key={source.key} className="flex items-center gap-2 p-2 bg-success/10 rounded-md border border-success/20">
+                        <div className="w-2 h-2 bg-success rounded-full" />
+                        <span className="text-xs font-medium">{source.name}</span>
+                        <Badge variant="outline" className="ml-auto text-xs">
+                          {sourceCounts[source.key] || 0}
+                        </Badge>
+                      </div>
+                    ))
+                  })()}
                 </div>
                 <p className="text-xs text-muted-foreground mt-3">
                   References were cross-validated using multiple academic databases for maximum accuracy

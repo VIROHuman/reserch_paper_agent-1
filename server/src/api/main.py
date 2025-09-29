@@ -155,6 +155,8 @@ async def upload_pdf(
     paper_type: str = Form("auto")
 ):
     try:
+        start_time = time.time()
+        
         if not file_handler or not pdf_extractor or not word_processor or not enhanced_parser:
             raise HTTPException(status_code=500, detail="Processors not initialized")
         
@@ -272,6 +274,11 @@ async def upload_pdf(
             total_missing_fields = sum(len(r.get("missing_fields", [])) for r in processing_results if "error" not in r)
             enriched_count = len([r for r in processing_results if r.get("api_enrichment_used", False)])
 
+            # Calculate processing time
+            end_time = time.time()
+            processing_time_seconds = end_time - start_time
+            processing_time_formatted = f"{int(processing_time_seconds // 60)}m {int(processing_time_seconds % 60)}s"
+
             return APIResponse(
                 success=True,
                 message=f"{file_type.upper()} document processed successfully. Found {len(references)} references, processed {successful_processing} successfully.",
@@ -284,6 +291,7 @@ async def upload_pdf(
                         "successfully_processed": successful_processing
                     },
                     "paper_type": paper_type,
+                    "processing_time": processing_time_formatted,
                     "summary": {
                         "total_references": len(references),
                         "successfully_processed": successful_processing,
@@ -470,6 +478,11 @@ async def process_file_with_progress(
     total_missing_fields = sum(len(r.get("missing_fields", [])) for r in processing_results if "error" not in r)
     enriched_count = len([r for r in processing_results if r.get("api_enrichment_used", False)])
 
+    # Calculate processing time
+    end_time = time.time()
+    processing_time_seconds = end_time - start_time
+    processing_time_formatted = f"{int(processing_time_seconds // 60)}m {int(processing_time_seconds % 60)}s"
+
     result = APIResponse(
         success=True,
         message=f"{file_type.upper()} document processed successfully. Found {len(references)} references, processed {successful_processing} successfully.",
@@ -482,6 +495,7 @@ async def process_file_with_progress(
                 "successfully_processed": successful_processing
             },
             "paper_type": paper_type,
+            "processing_time": processing_time_formatted,
             "summary": {
                 "total_references": len(references),
                 "successfully_processed": successful_processing,
@@ -589,6 +603,7 @@ async def process_file_async(
 ):
     """Async file processing function"""
     try:
+        start_time = time.time()
         job_manager.update_job_status(
             job_id, "processing",
             progress=10,
@@ -696,6 +711,11 @@ async def process_file_async(
         total_missing_fields = sum(len(r.get("missing_fields", [])) for r in processing_results if "error" not in r)
         enriched_count = len([r for r in processing_results if r.get("api_enrichment_used", False)])
         
+        # Calculate processing time
+        end_time = time.time()
+        processing_time_seconds = end_time - start_time
+        processing_time_formatted = f"{int(processing_time_seconds // 60)}m {int(processing_time_seconds % 60)}s"
+        
         # Complete job
         result = {
             "file_info": {
@@ -706,6 +726,7 @@ async def process_file_async(
                 "successfully_processed": successful_processing
             },
             "paper_type": paper_type,
+            "processing_time": processing_time_formatted,
             "summary": {
                 "total_references": len(references),
                 "successfully_processed": successful_processing,

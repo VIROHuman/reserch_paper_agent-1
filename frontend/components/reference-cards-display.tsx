@@ -244,23 +244,23 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
           >
             <Collapsible open={expandedCards.has(reference.index)} onOpenChange={() => toggleCard(reference.index)}>
               <CollapsibleTrigger asChild>
-                <CardHeader className="cursor-pointer hover:bg-muted/50 transition-colors">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="flex items-center gap-2">
+                <CardHeader className="cursor-pointer hover:bg-muted/50 transition-colors !grid-cols-none !grid-rows-none">
+                  <div className="flex items-start justify-between gap-4 w-full overflow-hidden">
+                    <div className="flex items-start gap-3 flex-1 min-w-0 overflow-hidden">
+                      <div className="flex items-center gap-2 flex-shrink-0">
                         {getStatusIcon(reference.qualityMetrics?.finalQualityScore, !!reference.error)}
                         <Badge variant="outline" className="text-xs">
                           Ref {reference.index}
                         </Badge>
                       </div>
-                      <div className="flex-1 min-w-0">
-                        <h3 className="font-medium text-left truncate">
+                      <div className="flex-1 min-w-0 space-y-1 overflow-hidden">
+                        <h3 className="font-medium text-left card-header-text">
                           {reference.error 
                             ? reference.originalText?.substring(0, 100) + (reference.originalText?.length > 100 ? "..." : "") || "Reference with parsing error"
                             : reference.extractedFields?.title || "Untitled Reference"
                           }
                         </h3>
-                        <p className="text-sm text-muted-foreground text-left">
+                        <p className="text-sm text-muted-foreground text-left card-header-text">
                           {reference.error 
                             ? "Parsing Error"
                             : `${reference.extractedFields?.familyNames?.join(", ") || "Unknown"} (${reference.extractedFields?.year || "Unknown"})`
@@ -268,7 +268,7 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                         </p>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-shrink-0">
                       <Badge variant="secondary" className="text-xs min-w-[3rem] h-6 flex items-center justify-center">
                         {reference.error ? "Error" : `${Math.round((reference.qualityMetrics?.finalQualityScore || 0) * 100)}%`}
                       </Badge>
@@ -327,7 +327,7 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                     </div>
                     {showOriginalText.has(reference.index) && (
                       <div className="p-3 bg-muted/30 rounded-lg border border-dashed">
-                        <p className="text-sm font-mono text-muted-foreground">{reference.originalText || "No original text available"}</p>
+                        <p className="text-sm font-mono text-muted-foreground text-wrap-preserve">{reference.originalText || "No original text available"}</p>
                         <Button
                           variant="ghost"
                           size="sm"
@@ -347,11 +347,11 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                       <Database className="h-4 w-4" />
                       Extracted Fields
                     </h4>
-                    <div className="grid md:grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <div className="flex justify-between">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="space-y-3">
+                        <div className="flex flex-col space-y-1">
                           <span className="text-xs text-muted-foreground">Authors:</span>
-                          <span className="text-xs font-medium">
+                          <span className="text-xs font-medium text-wrap-anywhere">
                             {reference.extractedFields?.familyNames?.length > 0 
                               ? reference.extractedFields.familyNames
                                   .map((name, i) => `${name}, ${reference.extractedFields?.givenNames?.[i] || "?"}`)
@@ -364,9 +364,9 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                           <span className="text-xs text-muted-foreground">Year:</span>
                           <span className="text-xs font-medium">{reference.extractedFields?.year || "N/A"}</span>
                         </div>
-                        <div className="flex justify-between">
+                        <div className="flex flex-col space-y-1">
                           <span className="text-xs text-muted-foreground">Journal:</span>
-                          <span className="text-xs font-medium truncate max-w-32">
+                          <span className="text-xs font-medium text-wrap-anywhere">
                             {reference.extractedFields?.journal || "N/A"}
                           </span>
                         </div>
@@ -375,34 +375,34 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                           <span className="text-xs font-medium">{reference.extractedFields?.pages || "N/A"}</span>
                         </div>
                       </div>
-                      <div className="space-y-2">
-                        <div className="flex justify-between">
+                      <div className="space-y-3">
+                        <div className="flex flex-col space-y-1">
                           <span className="text-xs text-muted-foreground">DOI:</span>
                           <div className="flex items-center gap-1">
-                            <span className="text-xs font-medium truncate max-w-32">
+                            <span className="text-xs font-medium text-wrap-break-all flex-1">
                               {reference.extractedFields?.doi || "N/A"}
                             </span>
                             {reference.extractedFields?.doi && (
-                              <Button variant="ghost" size="sm" className="h-4 w-4 p-0">
+                              <Button variant="ghost" size="sm" className="h-4 w-4 p-0 flex-shrink-0">
                                 <ExternalLink className="h-3 w-3" />
                               </Button>
                             )}
                           </div>
                         </div>
-                        <div className="flex justify-between">
+                        <div className="flex flex-col space-y-1">
                           <span className="text-xs text-muted-foreground">Publisher:</span>
-                          <span className="text-xs font-medium truncate max-w-32">
+                          <span className="text-xs font-medium text-wrap-anywhere">
                             {reference.extractedFields?.publisher || "N/A"}
                           </span>
                         </div>
-                        <div className="flex justify-between">
+                        <div className="flex flex-col space-y-1">
                           <span className="text-xs text-muted-foreground">URL:</span>
                           <div className="flex items-center gap-1">
-                            <span className="text-xs font-medium">
+                            <span className="text-xs font-medium text-wrap-break-all flex-1">
                               {reference.extractedFields?.url ? "Available" : "N/A"}
                             </span>
                             {reference.extractedFields?.url && (
-                              <Button variant="ghost" size="sm" className="h-4 w-4 p-0">
+                              <Button variant="ghost" size="sm" className="h-4 w-4 p-0 flex-shrink-0">
                                 <ExternalLink className="h-3 w-3" />
                               </Button>
                             )}

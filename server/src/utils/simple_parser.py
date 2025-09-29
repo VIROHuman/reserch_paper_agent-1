@@ -4,6 +4,7 @@ Simple reference parser using regex patterns
 import re
 from typing import List, Dict, Any, Optional
 from loguru import logger
+from .text_normalizer import text_normalizer
 
 
 class SimpleReferenceParser:
@@ -25,8 +26,8 @@ class SimpleReferenceParser:
             "missing_fields": []
         }
         
-        # Clean the text
-        text = ref_text.strip()
+        # Clean and normalize the text
+        text = text_normalizer.normalize_text(ref_text, preserve_case=True).strip()
         
         # Extract year
         year_match = re.search(r'\b(19|20)\d{2}\b', text)
@@ -71,77 +72,174 @@ class SimpleReferenceParser:
         return result
     
     def _extract_authors(self, text: str) -> List[Dict[str, str]]:
-        """Extract author names from reference text with improved patterns"""
+        """Very conservative author extraction - only detect clear author patterns"""
         authors = []
         
-        # More specific patterns that require proper author context
-        # Pattern 1: Last, F. or Last, F.M. format - must be at start or after proper context
-        pattern1 = r'(?:^|\s)([A-Z][a-z]{2,}),\s*([A-Z]\.(?:\s*[A-Z]\.)*)(?=\s|$)'
+        # Strategy 1: Very strict academic format at the beginning of reference
+        pattern1 = r'^(?:^|\s)([A-Z][a-z]{3,}),\s*([A-Z]\.(?:\s*[A-Z]\.)*)(?=\s)'
         matches1 = re.findall(pattern1, text)
         
         for surname, given in matches1:
-            # Validate that this looks like a real author name
-            if self._is_valid_author_name(surname, given, text):
+            # Very strict validation
+            if self._is_definitely_author(surname, given, text):
                 authors.append({
                     "surname": surname.strip(),
                     "given": given.strip().replace('.', '').replace(' ', '')
                 })
         
-        # Pattern 2: F. Last format - more specific context
+        # Strategy 2: Look for author patterns with year context (very conservative)
         if not authors:
-            pattern2 = r'(?:^|\s)([A-Z]\.(?:\s*[A-Z]\.)*)\s+([A-Z][a-z]{2,})(?=\s|$)'
+            # Pattern: "Author, F. (Year)" or "Author, F. Year" - very specific
+            pattern2 = r'([A-Z][a-z]{3,}),\s*([A-Z]\.)\s*[\(]?(19|20)\d{2}'
             matches2 = re.findall(pattern2, text)
             
-            for given, surname in matches2:
-                if self._is_valid_author_name(surname, given, text):
+            for surname, given, year in matches2:
+                if self._is_definitely_author(surname, given, text):
                     authors.append({
                         "surname": surname.strip(),
-                        "given": given.strip().replace('.', '').replace(' ', '')
+                        "given": given.strip().replace('.', '')
                     })
         
-        # Pattern 3: Handle multiple authors separated by semicolons or "and"
-        if len(authors) > 1:
-            # Check for "et al." pattern
-            if 'et al' in text.lower():
-                # Keep only first few authors
-                authors = authors[:3]
+        # Strategy 3: Look for multiple authors pattern (very conservative)
+        if not authors:
+            # Pattern: "Author1, F., Author2, F." - must have multiple authors
+            pattern3 = r'([A-Z][a-z]{3,}),\s*([A-Z]\.)(?:\s*[,.]?\s*([A-Z][a-z]{3,}),\s*([A-Z]\.))'
+            match3 = re.search(pattern3, text)
+            if match3:
+                surname1, given1, surname2, given2 = match3.groups()
+                if self._is_definitely_author(surname1, given1, text):
+                    authors.append({
+                        "surname": surname1.strip(),
+                        "given": given1.strip().replace('.', '')
+                    })
+                if surname2 and given2 and self._is_definitely_author(surname2, given2, text):
+                    authors.append({
+                        "surname": surname2.strip(),
+                        "given": given2.strip().replace('.', '')
+                    })
         
-        # Final validation: remove any authors that appear to be from the title
+        # Final strict validation: remove any questionable authors
         authors = self._filter_title_words(authors, text)
         
-        return authors
+        # Only return authors if we're confident they are real authors
+        return authors[:3] if len(authors) > 0 and self._has_good_author_confidence(authors, text) else []
     
-    def _is_valid_author_name(self, surname: str, given: str, full_text: str) -> bool:
-        """Validate if a name candidate is actually an author name"""
-        # Check minimum length requirements
-        if len(surname) < 3 or len(given.strip('.')) < 1:
+    def _is_definitely_author(self, surname: str, given: str, full_text: str) -> bool:
+        """Very strict validation - only accept if we're confident it's an author"""
+        import re
+        
+        # Basic length requirements
+        if len(surname) < 4 or len(given.strip('.')) < 1:
             return False
         
-        # Common title words that should not be author names
-        title_words = {
-            'health', 'care', 'blockchain', 'revolution', 'sweeps', 'offering',
-            'possibility', 'much', 'needed', 'data', 'solution', 'reaction',
-            'system', 'technology', 'digital', 'innovation', 'development',
-            'research', 'study', 'analysis', 'approach', 'method', 'model',
-            'framework', 'algorithm', 'network', 'platform', 'application'
+        # Must not be common English words or technical terms
+        common_words = {
+            'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'had', 
+            'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has', 'him', 'his', 
+            'how', 'its', 'may', 'new', 'now', 'old', 'see', 'two', 'way', 'who',
+            'mobile', 'cloud', 'computing', 'model', 'big', 'analysis', 'healthcare',
+            'applications', 'internet', 'things', 'comprehensive', 'survey',
+            'design', 'implementation', 'various', 'datapath', 'architectures',
+            'lightweight', 'cipher', 'fpga', 'frontiers', 'information', 'technology',
+            'electronic', 'engineering', 'student', 'centered', 'teaching',
+            'studying', 'community', 'exploration', 'index', 'reconstructing',
+            'evaluation', 'standard', 'universities', 'educational', 'forum',
+            'blockchain', 'machine', 'learning', 'artificial', 'intelligence',
+            'deep', 'neural', 'network', 'algorithm', 'framework', 'platform',
+            'system', 'software', 'hardware', 'database', 'server', 'client',
+            'interface', 'protocol', 'architecture', 'component', 'module',
+            'service', 'application', 'program', 'code', 'function', 'method'
         }
         
-        # Don't accept common title words as surnames
-        if surname.lower() in title_words:
+        if surname.lower() in common_words:
             return False
         
-        # Check if the surname appears in a title-like context
-        # Look for patterns like "Title, Journal" where the surname might be part of title
-        title_patterns = [
-            r'[A-Z][^,]*' + re.escape(surname) + r'[^,]*,',  # Title, surname, something
-            r'[A-Z][^.]*' + re.escape(surname) + r'[^.]*\.',  # Title. surname. something
-        ]
+        # Must not appear in title-like context
+        if self._appears_in_title_context(surname, full_text):
+            return False
         
-        for pattern in title_patterns:
-            if re.search(pattern, full_text, re.IGNORECASE):
-                return False
+        # Must be a real surname (not a made-up technical term)
+        if not self._looks_like_real_surname(surname):
+            return False
         
         return True
+    
+    def _appears_in_title_context(self, surname: str, title_section: str) -> bool:
+        """Check if a surname appears in title-like context"""
+        import re
+        
+        # Look for patterns where the surname is part of a title phrase
+        title_context_patterns = [
+            r'[A-Z][a-z]*\s+' + re.escape(surname) + r'\s+[A-Z][a-z]*',  # Word Surname Word
+            r'[A-Z][a-z]*\s+' + re.escape(surname) + r'[,:]',  # Word Surname, or Word Surname:
+            r':\s*[A-Z][a-z]*\s+' + re.escape(surname),  # : Word Surname
+            r'[A-Z][a-z]*\s+' + re.escape(surname) + r'\s+[A-Z][a-z]*\s+[A-Z]',  # Word Surname Word Word
+        ]
+        
+        for pattern in title_context_patterns:
+            if re.search(pattern, title_section, re.IGNORECASE):
+                return True
+        
+        return False
+    
+    def _looks_like_real_surname(self, surname: str) -> bool:
+        """Check if a word looks like a real surname"""
+        # Real surnames typically:
+        # 1. Are not all uppercase (unless very short)
+        # 2. Don't contain numbers
+        # 3. Don't contain special characters (except hyphens in some cases)
+        # 4. Are not common technical acronyms
+        
+        if surname.isupper() and len(surname) > 3:
+            return False
+        
+        if any(char.isdigit() for char in surname):
+            return False
+        
+        if any(char in surname for char in '.,!@#$%^&*()+=[]{}|\\:";\'<>?/~`'):
+            return False
+        
+        # Check for common surname patterns
+        surname_endings = ['son', 'sen', 'sson', 'ez', 'ovich', 'evich', 'ski', 'ska', 'ova', 'eva', 'ko', 'chuk', 'uk', 'ak', 'ik', 'yk']
+        
+        # If it ends in a common surname suffix, it's more likely to be real
+        if any(surname.lower().endswith(ending) for ending in surname_endings):
+            return True
+        
+        # If it's a reasonable length and doesn't look technical, it might be real
+        return len(surname) >= 4 and len(surname) <= 15
+    
+    def _has_good_author_confidence(self, authors: List[Dict[str, str]], text: str) -> bool:
+        """Check if we have good confidence that these are real authors"""
+        if not authors:
+            return False
+        
+        # If we have multiple authors, that's a good sign
+        if len(authors) > 1:
+            return True
+        
+        # For single author, need additional evidence
+        if len(authors) == 1:
+            author = authors[0]
+            surname = author['surname']
+            
+            # Check if surname appears in author-like context
+            author_context_patterns = [
+                rf'{re.escape(surname)},\s*[A-Z]\.\s+et\s+al\.',
+                rf'{re.escape(surname)},\s*[A-Z]\.\s+and',
+                rf'{re.escape(surname)},\s*[A-Z]\.\s*[,.]?\s*[A-Z][a-z]{{3,}},',
+            ]
+            
+            import re
+            for pattern in author_context_patterns:
+                if re.search(pattern, text, re.IGNORECASE):
+                    return True
+            
+            # If surname is at the very beginning of the reference, that's a good sign
+            if text.strip().lower().startswith(surname.lower()):
+                return True
+        
+        return False
     
     def _filter_title_words(self, authors: List[Dict[str, str]], full_text: str) -> List[Dict[str, str]]:
         """Filter out author candidates that are likely title words"""
@@ -161,20 +259,6 @@ class SimpleReferenceParser:
             filtered_authors.append(author)
         
         return filtered_authors
-    
-    def _appears_in_title_context(self, surname: str, title_section: str) -> bool:
-        """Check if a surname appears in title-like context"""
-        # Look for patterns where the surname is part of a title phrase
-        title_context_patterns = [
-            r'[A-Z][a-z]*\s+' + re.escape(surname) + r'\s+[A-Z][a-z]*',  # Word Surname Word
-            r'[A-Z][a-z]*\s+' + re.escape(surname) + r'[,:]',  # Word Surname, or Word Surname:
-        ]
-        
-        for pattern in title_context_patterns:
-            if re.search(pattern, title_section):
-                return True
-        
-        return False
     
     def _extract_title(self, text: str, authors: List[Dict[str, str]]) -> Optional[str]:
         """Extract title from reference text"""
@@ -218,24 +302,20 @@ class SimpleReferenceParser:
         # Look for italicized text (often journal names)
         # This is a simplified approach - in real PDFs, formatting info is lost
         
-        # Enhanced journal patterns
+        # Common journal patterns
         journal_patterns = [
-            r'In:\s*([^,.]{5,})',  # "In: Conference Name"
-            r'([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*[,.]\s*\d{4}',  # Journal Name, 2020
+            r'In:\s*([^,]+)',  # "In: Conference Name"
+            r'([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+\d{4}',  # Journal Name 2020
             r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*\.\s*\d{4}',  # Journal Name. 2020
-            r'([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*vol',  # Journal Name, vol
-            r'([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*,\s*pp',  # Journal Name, pp
-            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*\(\d{4}\)',  # Journal Name (2020)
         ]
         
         for pattern in journal_patterns:
             match = re.search(pattern, text)
             if match:
                 journal = match.group(1).strip()
-                # Clean up common artifacts
-                journal = re.sub(r'^[,.\s]+', '', journal)
-                journal = re.sub(r'[,.\s]+$', '', journal)
-                if len(journal) > 5 and not journal.lower().startswith(('vol', 'pp', 'p.')):
+                # Clean up
+                journal = re.sub(r'[.,;]$', '', journal)
+                if len(journal) > 3:  # Reasonable journal name length
                     return journal
         
         return None
@@ -252,64 +332,156 @@ class SimpleReferenceParser:
         return missing
     
     def generate_tagged_output(self, parsed_ref: Dict[str, Any], index: int) -> str:
-        """Generate XML-like tagged output"""
+        """Generate XML-like tagged output matching the target format exactly"""
         ref_id = f"ref{index + 1}"
         
-        # Build authors section
+        # Generate authors section with proper formatting
         authors_xml = "<authors>"
-        for i, (family, given) in enumerate(zip(parsed_ref["family_names"], parsed_ref["given_names"])):
-            authors_xml += f'<author><fnm>{given}</fnm><surname>{family}</surname></author>'
+        family_names = parsed_ref.get("family_names", [])
+        given_names = parsed_ref.get("given_names", [])
+        
+        for i, (family, given) in enumerate(zip(family_names, given_names)):
+            if family and given:
+                # Clean and format names properly
+                clean_family = family.strip()
+                clean_given = given.strip().replace('.', '')  # Remove periods from initials
+                authors_xml += f'<author><fnm>{clean_given}</fnm><surname>{clean_family}</surname></author>'
         authors_xml += "</authors>"
         
-        # Build title section
+        # Generate title section
         title_xml = ""
-        if parsed_ref["title"]:
-            title_xml = f'<title><maintitle>{parsed_ref["title"]}</maintitle></title>'
+        if parsed_ref.get("title"):
+            clean_title = parsed_ref["title"].strip()
+            title_xml = f'<title><maintitle>{clean_title}</maintitle></title>'
         
-        # Build year section
-        year_xml = ""
-        if parsed_ref["year"]:
-            year_xml = f'<date>{parsed_ref["year"]}</date>'
+        # Generate host/issue/series structure for journal information
+        host_xml = ""
+        if parsed_ref.get("journal"):
+            journal_name = parsed_ref["journal"].strip()
+            
+            # Check if we have volume and issue information
+            volume_xml = ""
+            issue_xml = ""
+            date_xml = ""
+            
+            if parsed_ref.get("year"):
+                date_xml = f'<date>{parsed_ref["year"]}</date>'
+            
+            # Try to extract volume and issue from journal field
+            volume_info = self._extract_volume_issue_info(parsed_ref)
+            if volume_info.get("volume"):
+                volume_xml = f'<volume>{volume_info["volume"]}</volume>'
+            if volume_info.get("issue"):
+                issue_xml = f'<issue>{volume_info["issue"]}</issue>'
+            
+            # Build the nested structure: host > issue > series
+            series_content = f'<title><maintitle>{journal_name}</maintitle></title>'
+            if volume_xml:
+                series_content += volume_xml
+            if issue_xml:
+                series_content += issue_xml
+            
+            issue_content = f'<series>{series_content}</series>'
+            if date_xml:
+                issue_content += date_xml
+                
+            host_xml = f'<host><issue>{issue_content}</issue></host>'
         
-        # Build journal section
-        journal_xml = ""
-        if parsed_ref["journal"]:
-            journal_xml = f'<host><issue><series><title><maintitle>{parsed_ref["journal"]}</maintitle></title></series>{year_xml}</issue></host>'
-        
-        # Build pages section
+        # Generate pages section with proper formatting
         pages_xml = ""
-        if parsed_ref["pages"]:
-            if '-' in parsed_ref["pages"] or '–' in parsed_ref["pages"]:
-                page_parts = re.split(r'[-–]', parsed_ref["pages"])
+        if parsed_ref.get("pages"):
+            pages = parsed_ref["pages"].strip()
+            if '-' in pages or '–' in pages:
+                import re
+                page_parts = re.split(r'[-–]', pages)
                 if len(page_parts) == 2:
-                    pages_xml = f'<pages><fpage>{page_parts[0]}</fpage><lpage>{page_parts[1]}</lpage></pages>'
+                    pages_xml = f'<pages><fpage>{page_parts[0].strip()}</fpage><lpage>{page_parts[1].strip()}</lpage></pages>'
                 else:
-                    pages_xml = f'<pages>{parsed_ref["pages"]}</pages>'
+                    pages_xml = f'<pages>{pages}</pages>'
             else:
-                pages_xml = f'<pages><fpage>{parsed_ref["pages"]}</fpage></pages>'
+                pages_xml = f'<pages><fpage>{pages}</fpage></pages>'
         
-        # Build DOI section
-        doi_xml = ""
-        if parsed_ref["doi"]:
-            doi_xml = f'<comment>DOI: {parsed_ref["doi"]}</comment>'
+        # Generate comment section for additional information
+        comments = []
+        if parsed_ref.get("doi"):
+            comments.append(f'DOI: {parsed_ref["doi"]}')
+        if parsed_ref.get("publisher"):
+            comments.append(f'Publisher: {parsed_ref["publisher"]}')
+        if parsed_ref.get("url"):
+            comments.append(f'URL: {parsed_ref["url"]}')
+        if parsed_ref.get("abstract"):
+            abstract_text = parsed_ref["abstract"][:200] + "..." if len(parsed_ref["abstract"]) > 200 else parsed_ref["abstract"]
+            comments.append(f'Abstract: {abstract_text}')
         
-        # Create label
+        comment_xml = ""
+        for comment in comments:
+            comment_xml += f'<comment>{comment}</comment>'
+        
+        # Generate label in the exact format: "FirstAuthor, Year" or "FirstAuthor et al., Year"
         label = ""
-        if parsed_ref["family_names"]:
-            if len(parsed_ref["family_names"]) == 1:
-                label = f"{parsed_ref['family_names'][0]}, {parsed_ref['year']}"
+        if family_names:
+            first_author = family_names[0]
+            year = parsed_ref.get("year", "n.d.")
+            
+            if len(family_names) == 1:
+                label = f"{first_author}, {year}"
             else:
-                label = f"{parsed_ref['family_names'][0]} et al., {parsed_ref['year']}"
+                label = f"{first_author} et al., {year}"
         
-        # Combine everything
+        # Assemble the final XML structure
         tagged_output = f'<reference id="{ref_id}">'
         if label:
             tagged_output += f'<label>{label}</label>'
         tagged_output += authors_xml
         tagged_output += title_xml
-        tagged_output += journal_xml
+        tagged_output += host_xml
         tagged_output += pages_xml
-        tagged_output += doi_xml
+        tagged_output += comment_xml
         tagged_output += '</reference>'
         
         return tagged_output
+    
+    def _extract_volume_issue_info(self, parsed_ref: Dict[str, Any]) -> Dict[str, str]:
+        """Extract volume and issue information from parsed reference"""
+        volume_info = {"volume": "", "issue": ""}
+        
+        # Try to extract from journal field
+        journal_text = parsed_ref.get("journal", "")
+        if journal_text:
+            import re
+            
+            # Look for volume patterns: vol. 4, vol 4, volume 4, v. 4
+            volume_patterns = [
+                r'vol\.?\s*(\d+)',
+                r'volume\s*(\d+)',
+                r'v\.?\s*(\d+)',
+                r'vol\s*(\d+)'
+            ]
+            
+            for pattern in volume_patterns:
+                match = re.search(pattern, journal_text, re.IGNORECASE)
+                if match:
+                    volume_info["volume"] = match.group(1)
+                    break
+            
+            # Look for issue patterns: no. 18, issue 18, n. 18
+            issue_patterns = [
+                r'no\.?\s*(\d+)',
+                r'issue\s*(\d+)',
+                r'n\.?\s*(\d+)',
+                r'number\s*(\d+)'
+            ]
+            
+            for pattern in issue_patterns:
+                match = re.search(pattern, journal_text, re.IGNORECASE)
+                if match:
+                    volume_info["issue"] = match.group(1)
+                    break
+        
+        # Also check if there are separate volume/issue fields
+        if parsed_ref.get("volume"):
+            volume_info["volume"] = str(parsed_ref["volume"])
+        if parsed_ref.get("issue"):
+            volume_info["issue"] = str(parsed_ref["issue"])
+            
+        return volume_info

@@ -1,5 +1,5 @@
 import os
-
+from langchain_ollama import OllamaLLM
 
 class Settings:
     def __init__(self):
@@ -23,3 +23,10 @@ class Settings:
         self.api_retry_delay = float(os.getenv("API_RETRY_DELAY", "2.0"))
         self.rate_limit_delay = float(os.getenv("RATE_LIMIT_DELAY", "1.5"))
 settings = Settings()
+
+def get_llm() -> OllamaLLM:
+    llm = OllamaLLM(
+    model="phi:latest",
+    temperature=0.7,
+    )
+    return llm

@@ -42,13 +42,22 @@ class AdvancedNERParser:
                  enable_entity_disambiguation: bool = True,
                  enable_confidence_weighting: bool = True):
         
-        # Load with aggregation_strategy for automatic B-/I- merging
-        self.parser = pipeline(
-            "ner",
-            model="SIRIS-Lab/citation-parser-ENTITY",
-            aggregation_strategy="simple",  # Merges tokens automatically
-            device=-1  # CPU
-        )
+        # Try to load the NER model with fallback
+        try:
+            # Load with aggregation_strategy for automatic B-/I- merging
+            self.parser = pipeline(
+                "ner",
+                model="SIRIS-Lab/citation-parser-ENTITY",
+                aggregation_strategy="simple",  # Merges tokens automatically
+                device=-1  # CPU
+            )
+            self.model_available = True
+            print("✅ NER model loaded successfully")
+        except Exception as e:
+            print(f"⚠️ Failed to load NER model: {e}")
+            print("🔄 Using regex-based parsing as fallback")
+            self.parser = None
+            self.model_available = False
         
         self.confidence_threshold = confidence_threshold
         self.enable_disambiguation = enable_entity_disambiguation
@@ -242,14 +251,18 @@ class AdvancedNERParser:
                 ambiguities.append(f"multiple_{etype.lower()}_detected")
         
         # Quality score: blend of field completeness and confidence
-        quality_score = (filled_fields / 10) * 0.5 + avg_confidence * 0.5
+        quality_score = float((filled_fields / 10) * 0.5 + avg_confidence * 0.5)
         
         return quality_score, ambiguities
     
     def parse_reference_to_dict(self, raw_citation: str) -> dict:
         """
-        Main parsing method - pure NER, no regex fallbacks
+        Main parsing method - uses NER if available, otherwise regex fallback
         """
+        if not self.model_available or not self.parser:
+            # Use regex-based fallback parsing
+            return self._regex_fallback_parsing(raw_citation)
+        
         # Stage 1: Extract raw entities
         raw_entities = self._extract_raw_entities(raw_citation)
         
@@ -280,7 +293,7 @@ class AdvancedNERParser:
             title_entity = self._resolve_conflicts(grouped['TITLE'])
             if title_entity:
                 result_data['title'] = title_entity['text']
-                result_data['confidence_scores']['title'] = title_entity['confidence']
+                result_data['confidence_scores']['title'] = float(title_entity['confidence'])
         
         # Authors
         if 'AUTHORS' in grouped:
@@ -290,7 +303,7 @@ class AdvancedNERParser:
                     author_entity['text'],
                     author_entity['confidence']
                 )
-                result_data['confidence_scores']['authors'] = author_entity['confidence']
+                result_data['confidence_scores']['authors'] = float(author_entity['confidence'])
         
         # Year
         if 'YEAR' in grouped:
@@ -303,7 +316,7 @@ class AdvancedNERParser:
                 if len(numeric_chars) == 4:
                     try:
                         result_data['year'] = int(numeric_chars)
-                        result_data['confidence_scores']['year'] = year_entity['confidence']
+                        result_data['confidence_scores']['year'] = float(year_entity['confidence'])
                     except ValueError:
                         pass
         
@@ -312,21 +325,21 @@ class AdvancedNERParser:
             journal_entity = self._resolve_conflicts(grouped['JOURNAL'])
             if journal_entity:
                 result_data['journal'] = journal_entity['text']
-                result_data['confidence_scores']['journal'] = journal_entity['confidence']
+                result_data['confidence_scores']['journal'] = float(journal_entity['confidence'])
         
         # Volume
         if 'VOLUME' in grouped:
             volume_entity = self._resolve_conflicts(grouped['VOLUME'])
             if volume_entity:
                 result_data['volume'] = volume_entity['text']
-                result_data['confidence_scores']['volume'] = volume_entity['confidence']
+                result_data['confidence_scores']['volume'] = float(volume_entity['confidence'])
         
         # Issue
         if 'ISSUE' in grouped:
             issue_entity = self._resolve_conflicts(grouped['ISSUE'])
             if issue_entity:
                 result_data['issue'] = issue_entity['text']
-                result_data['confidence_scores']['issue'] = issue_entity['confidence']
+                result_data['confidence_scores']['issue'] = float(issue_entity['confidence'])
         
         # Pages
         if 'PAGES' in grouped:
@@ -334,28 +347,28 @@ class AdvancedNERParser:
             if pages_text:
                 result_data['pages'] = pages_text
                 avg_conf = sum(e['confidence'] for e in grouped['PAGES']) / len(grouped['PAGES'])
-                result_data['confidence_scores']['pages'] = avg_conf
+                result_data['confidence_scores']['pages'] = float(avg_conf)
         
         # DOI
         if 'DOI' in grouped:
             doi_entity = self._resolve_conflicts(grouped['DOI'])
             if doi_entity:
                 result_data['doi'] = doi_entity['text']
-                result_data['confidence_scores']['doi'] = doi_entity['confidence']
+                result_data['confidence_scores']['doi'] = float(doi_entity['confidence'])
         
         # URL
         if 'URL' in grouped:
             url_entity = self._resolve_conflicts(grouped['URL'])
             if url_entity:
                 result_data['url'] = url_entity['text']
-                result_data['confidence_scores']['url'] = url_entity['confidence']
+                result_data['confidence_scores']['url'] = float(url_entity['confidence'])
         
         # Publisher
         if 'PUBLISHER' in grouped:
             pub_entity = self._resolve_conflicts(grouped['PUBLISHER'])
             if pub_entity:
                 result_data['publisher'] = pub_entity['text']
-                result_data['confidence_scores']['publisher'] = pub_entity['confidence']
+                result_data['confidence_scores']['publisher'] = float(pub_entity['confidence'])
         
         # Infer publication type
         result_data['publication_type'] = self._infer_publication_type(
@@ -369,7 +382,7 @@ class AdvancedNERParser:
         
         # Calculate quality metrics
         quality_score, ambiguities = self._calculate_extraction_quality(grouped, result)
-        result.confidence_scores['overall'] = quality_score
+        result.confidence_scores['overall'] = float(quality_score)
         result.ambiguity_flags = ambiguities
         
         return result.model_dump(by_alias=True)
@@ -443,3 +456,107 @@ if __name__ == "__main__":
         print(f"  Entity Counts: {result['entity_count']}")
         print(f"  Ambiguities: {result['ambiguity_flags'] if result['ambiguity_flags'] else 'None'}")
         print(f"  Field Confidences: {json.dumps({k: f'{v:.2f}' for k, v in result['confidence_scores'].items() if k != 'overall'}, indent=4)}")
+    
+    def _regex_fallback_parsing(self, raw_citation: str) -> dict:
+        """
+        Regex-based fallback parsing when NER model is not available
+        """
+        import re
+        
+        result = {
+            'title': None,
+            'authors': [],
+            'year': None,
+            'journal': None,
+            'volume': None,
+            'issue': None,
+            'pages': None,
+            'doi': None,
+            'url': None,
+            'publisher': None,
+            'publication_type': None,
+            'raw_text': raw_citation,
+            'confidence_scores': {'overall': 0.5},
+            'entity_count': {},
+            'ambiguity_flags': [],
+            'missing_fields': []
+        }
+        
+        # Extract year
+        year_match = re.search(r'\b(19|20)\d{2}\b', raw_citation)
+        if year_match:
+            result['year'] = int(year_match.group())
+            result['confidence_scores']['year'] = 0.8
+        
+        # Extract DOI
+        doi_match = re.search(r'10\.\d+/[^\s]+', raw_citation)
+        if doi_match:
+            result['doi'] = doi_match.group()
+            result['confidence_scores']['doi'] = 0.9
+        
+        # Extract URL
+        url_match = re.search(r'https?://[^\s]+', raw_citation)
+        if url_match:
+            result['url'] = url_match.group()
+            result['confidence_scores']['url'] = 0.9
+        
+        # Extract pages
+        pages_match = re.search(r'(\d+)(?:[-–—]\s*(\d+))?(?:\s*[,\s]|$)', raw_citation)
+        if pages_match:
+            if pages_match.group(2):
+                result['pages'] = f"{pages_match.group(1)}-{pages_match.group(2)}"
+            else:
+                result['pages'] = pages_match.group(1)
+            result['confidence_scores']['pages'] = 0.7
+        
+        # Extract authors (simple pattern)
+        author_pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)'
+        authors = re.findall(author_pattern, raw_citation)
+        if authors:
+            for author in authors[:5]:  # Limit to 5 authors
+                if len(author.split()) >= 2:  # At least first and last name
+                    name_parts = author.split()
+                    result['authors'].append(Author(
+                        first_name=name_parts[0],
+                        surname=name_parts[-1],
+                        full_name=author
+                    ))
+            result['confidence_scores']['authors'] = 0.6
+        
+        # Extract title (text between authors and year/journal)
+        title_pattern = r'(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*[,\s]*)*([^,]+?)(?:\s*,\s*(?:19|20)\d{2}|\s*,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)'
+        title_match = re.search(title_pattern, raw_citation)
+        if title_match:
+            title = title_match.group(1).strip()
+            if len(title) > 10:  # Reasonable title length
+                result['title'] = title
+                result['confidence_scores']['title'] = 0.7
+        
+        # Extract journal (text after title, before year)
+        journal_pattern = r'(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*[,\s]*)*[^,]+?,\s*([^,]+?)(?:\s*,\s*(?:19|20)\d{2})'
+        journal_match = re.search(journal_pattern, raw_citation)
+        if journal_match:
+            journal = journal_match.group(1).strip()
+            if len(journal) > 3:  # Reasonable journal name length
+                result['journal'] = journal
+                result['confidence_scores']['journal'] = 0.6
+        
+        # Calculate overall confidence
+        confidences = [v for k, v in result['confidence_scores'].items() if k != 'overall']
+        if confidences:
+            result['confidence_scores']['overall'] = float(sum(confidences) / len(confidences))
+        
+        # Identify missing fields
+        missing_fields = []
+        if not result['title']:
+            missing_fields.append('title')
+        if not result['authors']:
+            missing_fields.append('authors')
+        if not result['year']:
+            missing_fields.append('year')
+        if not result['journal']:
+            missing_fields.append('journal')
+        
+        result['missing_fields'] = missing_fields
+        
+        return result

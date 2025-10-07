@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Optional
 from loguru import logger
 
 from .simple_parser import SimpleReferenceParser
+from .ner_reference_parser import NERReferenceParser
 from .api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient
 from .smart_api_strategy import SmartAPIStrategy
 from .doi_metadata_extractor import DOIMetadataExtractor, DOIMetadataConflictDetector
@@ -17,6 +18,14 @@ class EnhancedReferenceParser:
     """Enhanced parser that combines local parsing with API client enrichment"""
     
     def __init__(self):
+        # Initialize NER parser as the primary parsing method
+        self.ner_parser = NERReferenceParser(
+            confidence_threshold=0.5,
+            enable_entity_disambiguation=True,
+            enable_confidence_weighting=True
+        )
+        
+        # Keep simple parser as fallback
         self.simple_parser = SimpleReferenceParser()
         
         # Initialize smart API strategy
@@ -35,68 +44,81 @@ class EnhancedReferenceParser:
         # Initialize flagging system
         self.flagging_system = ReferenceFlaggingSystem()
         
-        logger.info("Enhanced reference parser initialized with Smart API Strategy, DOI extraction, and Flagging System")
+        logger.info("Enhanced reference parser initialized with NER as primary parser, Smart API Strategy, DOI extraction, and Flagging System")
+    
+    def _convert_ner_result_to_enhanced_format(self, ner_result: dict) -> Dict[str, Any]:
+        """
+        Convert NER parser result to the format expected by enhanced parser
+        """
+        # Extract authors
+        authors = ner_result.get('authors', [])
+        family_names = []
+        given_names = []
+        
+        for author in authors:
+            if isinstance(author, dict):
+                if author.get('surname'):
+                    family_names.append(author['surname'])
+                if author.get('first_name'):
+                    given_names.append(author['first_name'])
+            elif isinstance(author, str):
+                family_names.append(author)
+        
+        return {
+            "family_names": family_names,
+            "given_names": given_names,
+            "year": ner_result.get('year'),
+            "title": ner_result.get('title'),
+            "journal": ner_result.get('journal'),
+            "volume": ner_result.get('volume'),
+            "issue": ner_result.get('issue'),
+            "pages": ner_result.get('pages'),
+            "doi": ner_result.get('doi'),
+            "url": ner_result.get('url'),
+            "publisher": ner_result.get('publisher'),
+            "abstract": ner_result.get('abstract'),
+            "publication_type": ner_result.get('publication_type'),
+            "raw_text": ner_result.get('raw_text', ''),
+            "missing_fields": ner_result.get('missing_fields', []),
+            "quality_score": ner_result.get('quality_score', 0.0),
+            "confidence_scores": ner_result.get('confidence_scores', {}),
+            "parser_used": "NER_MODEL"
+        }
     
     async def _enhanced_initial_parsing(self, ref_text: str) -> Dict[str, Any]:
-        """Enhanced initial parsing that combines multiple strategies"""
+        """Enhanced initial parsing using NER as primary method"""
         try:
-            # Enhanced parsing with multiple strategies
-            # Start with simple parser as base
-            parsed_ref = self.simple_parser.parse_reference(ref_text)
+            # Use NER parser as the primary parsing method
+            logger.info(f"🤖 Using NER parser for initial parsing: {ref_text[:100]}...")
+            parsed_ref = self.ner_parser.parse_reference_to_dict(ref_text)
             
-            # Always try enhanced title extraction first, regardless of what simple parser found
-            enhanced_title = self._extract_title_enhanced(ref_text)
-            if enhanced_title and len(enhanced_title) > 10:
-                parsed_ref["title"] = enhanced_title
+            # Convert NER result to the expected format for further processing
+            parsed_ref = self._convert_ner_result_to_enhanced_format(parsed_ref)
+            logger.info(f"✅ NER parsing completed - Title: {parsed_ref.get('title', 'None')[:50]}..., Authors: {len(parsed_ref.get('family_names', []))}, Year: {parsed_ref.get('year', 'None')}")
             
-            # If still no title, try more aggressive approaches
+            # Only apply fallback enhancements if NER results are insufficient
             if not parsed_ref.get("title") or len(parsed_ref.get("title", "")) < 10:
-                # Try to extract title using different strategies
-                title_candidates = []
-                
-                # Strategy: Look for text between first period and year
-                import re
-                first_period = ref_text.find('.')
-                if first_period != -1:
-                    after_first_period = ref_text[first_period+1:].strip()
-                    year_match = re.search(r'\b(19|20)\d{2}\b', after_first_period)
-                    if year_match:
-                        potential_title = after_first_period[:year_match.start()].strip()
-                        if len(potential_title) > 15:
-                            title_candidates.append(potential_title)
-                
-                # Strategy: Look for longest sentence that looks like a title
-                sentences = re.split(r'[.!?]', ref_text)
-                for sentence in sentences:
-                    sentence = sentence.strip()
-                    if (len(sentence) > 20 and 
-                        not sentence.lower().startswith(('vol', 'pp', 'p.', 'no', 'issue', 'volume', 'int j', 'ieee', 'proc')) and
-                        not self._looks_like_author_names(sentence) and
-                        sentence[0].isupper()):
-                        title_candidates.append(sentence)
-                
-                # Choose the best candidate
-                if title_candidates:
-                    # Prefer longer titles that don't look like author names
-                    best_title = max(title_candidates, key=lambda x: len(x) if not self._looks_like_author_names(x) else 0)
-                    parsed_ref["title"] = best_title
+                logger.info("⚠️ NER didn't extract title, trying fallback methods")
+                enhanced_title = self._extract_title_enhanced(ref_text)
+                if enhanced_title and len(enhanced_title) > 10:
+                    parsed_ref["title"] = enhanced_title
             
             if not parsed_ref.get("journal") or len(parsed_ref.get("journal", "")) < 5:
-                # Try improved journal extraction
+                logger.info("⚠️ NER didn't extract journal, trying fallback methods")
                 parsed_ref["journal"] = self._extract_journal_enhanced(ref_text)
             
             if not parsed_ref.get("family_names"):
-                # Try improved author extraction
+                logger.info("⚠️ NER didn't extract authors, trying fallback methods")
                 authors = self._extract_authors_enhanced(ref_text)
                 parsed_ref["family_names"] = [author["surname"] for author in authors]
                 parsed_ref["given_names"] = [author["given"] for author in authors]
             
-            # Try to extract year if missing
             if not parsed_ref.get("year"):
+                logger.info("⚠️ NER didn't extract year, trying fallback methods")
                 parsed_ref["year"] = self._extract_year_enhanced(ref_text)
             
-            # Try to extract publisher if missing
             if not parsed_ref.get("publisher"):
+                logger.info("⚠️ NER didn't extract publisher, trying fallback methods")
                 parsed_ref["publisher"] = self._extract_publisher(ref_text)
             
             # Try to extract URL if missing
@@ -817,9 +839,9 @@ class EnhancedReferenceParser:
         enable_api_enrichment: bool = True
     ) -> Dict[str, Any]:
         try:
-            # Use enhanced parsing strategy - combine multiple approaches
+            # Use NER as primary parsing strategy with fallbacks
             parsed_ref = await self._enhanced_initial_parsing(ref_text)
-            parser_used = "enhanced"
+            parser_used = parsed_ref.get("parser_used", "NER_MODEL")
             
             # Ensure we have basic fields before proceeding
             if not parsed_ref.get("title") and not parsed_ref.get("family_names"):
@@ -839,10 +861,13 @@ class EnhancedReferenceParser:
             
             if enable_api_enrichment:
                 try:
+                    # Enhanced API enrichment with aggressive missing data search
                     enriched_ref = await self.smart_api.enrich_reference_smart(
                         parsed_ref, 
                         ref_text,
-                        force_enrichment=True
+                        force_enrichment=True,
+                        aggressive_search=True,  # New parameter for aggressive search
+                        fill_missing_fields=True  # New parameter to fill missing fields
                     )
                     enriched_ref["parser_used"] = parser_used
                     enriched_ref["api_enrichment_used"] = True

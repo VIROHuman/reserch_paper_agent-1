@@ -82,6 +82,11 @@ export function ResultsDashboard({ data, onNewFile, onViewReferences }: ResultsD
     ref.api_enrichment_used
   ).length
   
+  // Count NER parser usage
+  const nerParsed = references.filter(ref => 
+    ref.parser_used && ref.parser_used.includes('NER')
+  ).length
+  
   // Calculate average quality score from individual reference confidence scores
   const avgConfidence = references.length > 0 
     ? references.reduce((sum, ref) => sum + (ref.confidence || 0), 0) / references.length
@@ -210,6 +215,16 @@ export function ResultsDashboard({ data, onNewFile, onViewReferences }: ResultsD
                 </div>
               </CardContent>
             </Card>
+
+            <Card className="bg-gradient-to-br from-blue-500/5 to-blue-500/10 border-blue-500/20">
+              <CardContent className="p-4 text-center">
+                <div className="space-y-2">
+                  <Database className="h-6 w-6 text-blue-500 mx-auto" />
+                  <div className="text-2xl font-bold text-blue-500">{nerParsed}</div>
+                  <div className="text-xs text-muted-foreground">NER Parsed</div>
+                </div>
+              </CardContent>
+            </Card>
           </div>
 
           {/* Quality Score */}
@@ -264,6 +279,12 @@ export function ResultsDashboard({ data, onNewFile, onViewReferences }: ResultsD
                   <span className="text-sm text-muted-foreground">API Enrichment:</span>
                   <Badge variant="secondary" className="bg-primary/10 text-primary">
                     {stats.totalReferences > 0 ? Math.round((stats.apiEnriched / stats.totalReferences) * 100) : 0}%
+                  </Badge>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-sm text-muted-foreground">NER Parsing:</span>
+                  <Badge variant="secondary" className="bg-blue-500/10 text-blue-600">
+                    {stats.totalReferences > 0 ? Math.round((nerParsed / stats.totalReferences) * 100) : 0}%
                   </Badge>
                 </div>
                 <div className="flex justify-between items-center">

@@ -65,10 +65,12 @@ class SmartAPIStrategy:
         logger.info("Smart API Strategy initialized")
     
     async def enrich_reference_smart(
-        self, 
-        parsed_ref: Dict[str, Any], 
+        self,
+        parsed_ref: Dict[str, Any],
         original_text: str,
-        force_enrichment: bool = True
+        force_enrichment: bool = True,
+        aggressive_search: bool = False,
+        fill_missing_fields: bool = False
     ) -> Dict[str, Any]:
         enriched_ref = parsed_ref.copy()
         enrichment_sources = []
@@ -82,6 +84,11 @@ class SmartAPIStrategy:
         needs_enrichment = self._needs_enrichment(parsed_ref, initial_quality, force_enrichment)
         author_analysis = self._analyze_authors(parsed_ref)
         
+        # Enhanced logic for aggressive search and missing field filling
+        if aggressive_search or fill_missing_fields:
+            needs_enrichment = True
+            logger.info(f"🔍 Aggressive search enabled - will search for missing data")
+        
         if not needs_enrichment:
             enriched_ref["api_enrichment_used"] = False
             enriched_ref["enrichment_sources"] = []
@@ -92,8 +99,13 @@ class SmartAPIStrategy:
         
         timeout_occurred = False
         current_quality = initial_quality  # Initialize current_quality
+        
+        # Adjust max API calls for aggressive search
+        max_calls = self.max_api_calls * 2 if aggressive_search else self.max_api_calls
+        logger.info(f"🔍 Using {max_calls} API calls for enrichment")
+        
         for i, provider in enumerate(self.api_priority):
-            if len(api_results) >= self.max_api_calls:
+            if len(api_results) >= max_calls:
                 break
             
             # Add delay between API calls to prevent rate limiting
@@ -126,10 +138,10 @@ class SmartAPIStrategy:
         # Apply multi-source adjudication if we have multiple results
         if len(api_results) > 1:
             logger.info(f"Applying multi-source adjudication for {len(api_results)} sources")
-            enriched_ref = self._apply_multi_source_adjudication(enriched_ref, api_results)
+            enriched_ref = self._apply_multi_source_adjudication(enriched_ref, api_results, fill_missing_fields)
         elif len(api_results) == 1:
             # Single source - merge directly
-            enriched_ref = self._merge_api_result(enriched_ref, api_results[0])
+            enriched_ref = self._merge_api_result(enriched_ref, api_results[0], fill_missing_fields)
         
         # Calculate final quality
         current_quality = self._calculate_data_quality(enriched_ref)
@@ -378,7 +390,7 @@ class SmartAPIStrategy:
         
         return False
     
-    def _apply_multi_source_adjudication(self, enriched_ref: Dict[str, Any], api_results: List[APIResult]) -> Dict[str, Any]:
+    def _apply_multi_source_adjudication(self, enriched_ref: Dict[str, Any], api_results: List[APIResult], fill_missing_fields: bool = False) -> Dict[str, Any]:
         """Apply multi-source adjudication to resolve conflicts and choose best data"""
         if not api_results:
             return enriched_ref
@@ -1080,13 +1092,32 @@ class SmartAPIStrategy:
         
         return result
     
-    def _merge_api_result(self, original: Dict[str, Any], api_result: APIResult) -> Dict[str, Any]:
+    def _merge_api_result(self, original: Dict[str, Any], api_result: APIResult, fill_missing_fields: bool = False) -> Dict[str, Any]:
         """Robust merge with acceptance gates and score-based rules"""
         merged = original.copy()
         merged_fields = []
         
         # Calculate match score for merge decisions
         match_score = self._calculate_merge_score(original, api_result)
+        
+        # Enhanced logic for filling missing fields
+        if fill_missing_fields:
+            logger.info(f"🔍 Fill missing fields mode - will fill any missing data")
+            # Fill all missing fields regardless of match score
+            for field in ["title", "year", "journal", "doi", "pages", "publisher", "url", "abstract", "volume", "issue"]:
+                if not merged.get(field) and api_result.data.get(field):
+                    merged[field] = api_result.data[field]
+                    merged_fields.append(field)
+                    logger.info(f"✅ Filled missing {field}: '{api_result.data[field]}'")
+            
+            # Handle authors specially
+            if not merged.get("family_names") and api_result.data.get("family_names"):
+                merged["family_names"] = api_result.data["family_names"]
+                merged["given_names"] = api_result.data.get("given_names", [])
+                merged_fields.append("authors")
+                logger.info(f"✅ Filled missing authors: {api_result.data['family_names']}")
+            
+            return merged
         
         # Apply merge rules based on score
         if match_score < 0.60:

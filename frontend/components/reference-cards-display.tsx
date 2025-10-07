@@ -30,6 +30,9 @@ interface ReferenceData {
   parserUsed: string
   apiEnrichmentUsed: boolean
   enrichmentSources: string[]
+  confidenceScores?: Record<string, number>
+  entityCount?: Record<string, number>
+  ambiguityFlags?: string[]
   extractedFields: {
     familyNames: string[]
     givenNames: string[]
@@ -71,6 +74,9 @@ function normalizeReference(ref: any): ReferenceData {
     parserUsed: ref.parserUsed || ref.parser_used || "unknown",
     apiEnrichmentUsed: ref.apiEnrichmentUsed || ref.api_enrichment_used || false,
     enrichmentSources: ref.enrichmentSources || ref.enrichment_sources || [],
+    confidenceScores: ref.confidenceScores || ref.confidence_scores || {},
+    entityCount: ref.entityCount || ref.entity_count || {},
+    ambiguityFlags: ref.ambiguityFlags || ref.ambiguity_flags || [],
     extractedFields: {
       familyNames: ref.extractedFields?.familyNames || ref.extracted_fields?.family_names || [],
       givenNames: ref.extractedFields?.givenNames || ref.extracted_fields?.given_names || [],
@@ -426,6 +432,83 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                         {reference.missingFields.map((field) => (
                           <Badge key={field} variant="outline" className="text-xs border-yellow-500/20 text-yellow-600">
                             {field}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Parser Information */}
+                  {reference.parserUsed && (
+                    <div className="space-y-2">
+                      <h4 className="text-sm font-medium flex items-center gap-2">
+                        <Database className="h-4 w-4 text-blue-600" />
+                        Parser Information
+                      </h4>
+                      <div className="flex flex-wrap gap-1">
+                        <Badge 
+                          variant={reference.parserUsed.includes('NER') ? "default" : "secondary"} 
+                          className={`text-xs ${reference.parserUsed.includes('NER') ? 'bg-blue-600 text-white' : ''}`}
+                        >
+                          {reference.parserUsed}
+                        </Badge>
+                        {reference.parserUsed.includes('NER') && (
+                          <Badge variant="outline" className="text-xs border-blue-500/20 text-blue-600">
+                            AI-Powered
+                          </Badge>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* NER Confidence Scores */}
+                  {reference.parserUsed.includes('NER') && reference.confidenceScores && Object.keys(reference.confidenceScores).length > 0 && (
+                    <div className="space-y-2">
+                      <h4 className="text-sm font-medium flex items-center gap-2">
+                        <CheckCircle className="h-4 w-4 text-green-600" />
+                        NER Confidence Scores
+                      </h4>
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        {Object.entries(reference.confidenceScores).map(([field, score]) => (
+                          <div key={field} className="flex justify-between items-center p-2 bg-gray-50 rounded">
+                            <span className="capitalize">{field}:</span>
+                            <Badge variant="outline" className="text-xs">
+                              {Math.round(score * 100)}%
+                            </Badge>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Entity Count */}
+                  {reference.parserUsed.includes('NER') && reference.entityCount && Object.keys(reference.entityCount).length > 0 && (
+                    <div className="space-y-2">
+                      <h4 className="text-sm font-medium flex items-center gap-2">
+                        <BookOpen className="h-4 w-4 text-purple-600" />
+                        Extracted Entities
+                      </h4>
+                      <div className="flex flex-wrap gap-1">
+                        {Object.entries(reference.entityCount).map(([entity, count]) => (
+                          <Badge key={entity} variant="outline" className="text-xs border-purple-500/20 text-purple-600">
+                            {entity}: {count}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Ambiguity Flags */}
+                  {reference.parserUsed.includes('NER') && reference.ambiguityFlags && reference.ambiguityFlags.length > 0 && (
+                    <div className="space-y-2">
+                      <h4 className="text-sm font-medium flex items-center gap-2">
+                        <AlertTriangle className="h-4 w-4 text-orange-600" />
+                        Ambiguity Flags
+                      </h4>
+                      <div className="flex flex-wrap gap-1">
+                        {reference.ambiguityFlags.map((flag) => (
+                          <Badge key={flag} variant="outline" className="text-xs border-orange-500/20 text-orange-600">
+                            {flag.replace('_', ' ')}
                           </Badge>
                         ))}
                       </div>

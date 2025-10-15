@@ -23,6 +23,14 @@ import { Separator } from "@/components/ui/separator"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { ValidationChangesView } from "./validation-changes-view"
+
+interface ValidationChange {
+  field: string
+  type: "added" | "updated" | "unchanged"
+  before: any
+  after: any
+}
 
 interface ReferenceData {
   index: number
@@ -36,6 +44,7 @@ interface ReferenceData {
   extractedFields: {
     familyNames: string[]
     givenNames: string[]
+    fullNames?: string[]
     year: number
     title: string
     journal: string
@@ -58,6 +67,7 @@ interface ReferenceData {
     partialFields: string[]
     dataSourcesUsed: string[]
   }
+  validationChanges?: ValidationChange[]
   error?: string
 }
 
@@ -80,6 +90,7 @@ function normalizeReference(ref: any): ReferenceData {
     extractedFields: {
       familyNames: ref.extractedFields?.familyNames || ref.extracted_fields?.family_names || [],
       givenNames: ref.extractedFields?.givenNames || ref.extracted_fields?.given_names || [],
+      fullNames: ref.extractedFields?.fullNames || ref.extracted_fields?.full_names || [],
       year: ref.extractedFields?.year || ref.extracted_fields?.year || 0,
       title: ref.extractedFields?.title || ref.extracted_fields?.title || "",
       journal: ref.extractedFields?.journal || ref.extracted_fields?.journal || "",
@@ -96,6 +107,7 @@ function normalizeReference(ref: any): ReferenceData {
     missingFields: ref.missingFields || ref.missing_fields || [],
     taggedOutput: ref.taggedOutput || ref.tagged_output || "",
     flaggingAnalysis: ref.flaggingAnalysis || ref.flagging_analysis || {},
+    validationChanges: ref.validationChanges || ref.validation_changes || [],
     error: ref.error
   }
 }
@@ -358,7 +370,9 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                         <div className="flex flex-col space-y-1">
                           <span className="text-xs text-muted-foreground">Authors:</span>
                           <span className="text-xs font-medium text-wrap-anywhere">
-                            {reference.extractedFields?.familyNames?.length > 0 
+                            {reference.extractedFields?.fullNames && reference.extractedFields.fullNames.length > 0 
+                              ? reference.extractedFields.fullNames.join("; ")
+                              : reference.extractedFields?.familyNames?.length > 0 
                               ? reference.extractedFields.familyNames
                                   .map((name, i) => `${name}, ${reference.extractedFields?.givenNames?.[i] || "?"}`)
                                   .join("; ")
@@ -529,6 +543,16 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                           </Badge>
                         ))}
                       </div>
+                    </div>
+                  )}
+
+                  {/* Validation Changes */}
+                  {reference.validationChanges && reference.validationChanges.length > 0 && (
+                    <div className="space-y-2">
+                      <ValidationChangesView 
+                        changes={reference.validationChanges} 
+                        referenceIndex={reference.index}
+                      />
                     </div>
                   )}
 

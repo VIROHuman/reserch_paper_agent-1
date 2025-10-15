@@ -20,7 +20,7 @@ class EnhancedReferenceParser:
     def __init__(self):
         # Initialize NER parser as the primary parsing method
         self.ner_parser = NERReferenceParser(
-            confidence_threshold=0.5,
+            confidence_threshold=0.1,  # Lowered to catch more entities
             enable_entity_disambiguation=True,
             enable_confidence_weighting=True
         )
@@ -57,12 +57,20 @@ class EnhancedReferenceParser:
         
         for author in authors:
             if isinstance(author, dict):
-                if author.get('surname'):
+                # Dictionary format
+                if author.get('surname') and author.get('surname') != 'None':
                     family_names.append(author['surname'])
-                if author.get('first_name'):
+                if author.get('first_name') and author.get('first_name') != 'None':
                     given_names.append(author['first_name'])
             elif isinstance(author, str):
+                # String format
                 family_names.append(author)
+            elif hasattr(author, 'surname'):
+                # Pydantic Author object
+                if author.surname and author.surname != 'None':
+                    family_names.append(author.surname)
+                if author.first_name and author.first_name != 'None':
+                    given_names.append(author.first_name)
         
         return {
             "family_names": family_names,
@@ -839,6 +847,8 @@ class EnhancedReferenceParser:
         enable_api_enrichment: bool = True
     ) -> Dict[str, Any]:
         try:
+            logger.info(f"🔧 parse_reference_enhanced called with enable_api_enrichment={enable_api_enrichment}")
+            
             # Use NER as primary parsing strategy with fallbacks
             parsed_ref = await self._enhanced_initial_parsing(ref_text)
             parser_used = parsed_ref.get("parser_used", "NER_MODEL")
@@ -851,15 +861,16 @@ class EnhancedReferenceParser:
             
             doi_metadata = None
             conflict_analysis = None
-            if parsed_ref.get('doi'):
-                try:
-                    doi_metadata = await self.doi_extractor.extract_metadata(parsed_ref.get('doi'))
-                    if doi_metadata and not doi_metadata.get('error'):
-                        conflict_analysis = self.conflict_detector.detect_conflicts(doi_metadata, parsed_ref)
-                except Exception as e:
-                    logger.error(f"DOI metadata extraction error: {str(e)}")
             
             if enable_api_enrichment:
+                # Only extract DOI metadata during validation, not parsing
+                if parsed_ref.get('doi'):
+                    try:
+                        doi_metadata = await self.doi_extractor.extract_metadata(parsed_ref.get('doi'))
+                        if doi_metadata and not doi_metadata.get('error'):
+                            conflict_analysis = self.conflict_detector.detect_conflicts(doi_metadata, parsed_ref)
+                    except Exception as e:
+                        logger.error(f"DOI metadata extraction error: {str(e)}")
                 try:
                     # Enhanced API enrichment with aggressive missing data search
                     enriched_ref = await self.smart_api.enrich_reference_smart(

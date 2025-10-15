@@ -1,14 +1,40 @@
 """
 Job manager for async processing with gentle cleanup
+Enhanced to support two-step workflow: parsing and validation
 """
 import asyncio
 import uuid
 import os
 import time
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from loguru import logger
 from ..models.schemas import JobStatus
+
+
+class ParsedBatch:
+    """Represents a batch of parsed references waiting for validation"""
+    
+    def __init__(self, batch_id: str, file_info: dict, parsed_references: List[dict]):
+        self.batch_id = batch_id
+        self.file_info = file_info
+        self.parsed_references = parsed_references
+        self.created_at = datetime.now()
+        self.validation_status = "not_validated"  # not_validated, validating, validated, failed
+        self.validation_result = None
+        self.paper_type = file_info.get("paper_type", "auto")
+        
+    def to_dict(self):
+        return {
+            "batch_id": self.batch_id,
+            "file_info": self.file_info,
+            "parsed_references": self.parsed_references,
+            "created_at": self.created_at.isoformat(),
+            "validation_status": self.validation_status,
+            "validation_result": self.validation_result,
+            "paper_type": self.paper_type,
+            "reference_count": len(self.parsed_references)
+        }
 
 
 class JobManager:
@@ -16,6 +42,7 @@ class JobManager:
     
     def __init__(self, cleanup_retention_hours: int = 2):
         self.jobs: Dict[str, JobStatus] = {}
+        self.parsed_batches: Dict[str, ParsedBatch] = {}  # Store parsed results
         self.cleanup_retention_hours = cleanup_retention_hours
         self.cleanup_task = None
         self._cleanup_started = False
@@ -140,6 +167,52 @@ class JobManager:
     def get_active_job_count(self) -> int:
         """Get number of active jobs"""
         return len([j for j in self.jobs.values() if j.status in ["pending", "processing"]])
+    
+    # ===== NEW: Parsed Batch Management =====
+    
+    def create_parsed_batch(self, file_info: dict, parsed_references: List[dict]) -> str:
+        """Create a new batch of parsed references"""
+        batch_id = str(uuid.uuid4())
+        batch = ParsedBatch(batch_id, file_info, parsed_references)
+        self.parsed_batches[batch_id] = batch
+        logger.info(f"📦 Created parsed batch {batch_id} with {len(parsed_references)} references")
+        return batch_id
+    
+    def get_parsed_batch(self, batch_id: str) -> Optional[ParsedBatch]:
+        """Get parsed batch by ID"""
+        return self.parsed_batches.get(batch_id)
+    
+    def update_batch_validation_status(self, batch_id: str, status: str, result: Any = None):
+        """Update validation status for a batch"""
+        batch = self.parsed_batches.get(batch_id)
+        if not batch:
+            logger.warning(f"Batch {batch_id} not found")
+            return
+        
+        batch.validation_status = status
+        if result:
+            batch.validation_result = result
+        
+        logger.info(f"📊 Batch {batch_id} validation status: {status}")
+    
+    def get_batch_count(self) -> int:
+        """Get total number of parsed batches"""
+        return len(self.parsed_batches)
+    
+    def cleanup_old_batches(self):
+        """Clean up old parsed batches"""
+        cutoff_time = datetime.now() - timedelta(hours=self.cleanup_retention_hours)
+        batches_to_remove = []
+        
+        for batch_id, batch in self.parsed_batches.items():
+            if batch.created_at < cutoff_time:
+                batches_to_remove.append(batch_id)
+        
+        for batch_id in batches_to_remove:
+            self.parsed_batches.pop(batch_id, None)
+        
+        if batches_to_remove:
+            logger.info(f"🧹 Cleaned up {len(batches_to_remove)} old batches")
 
 
 # Global job manager instance

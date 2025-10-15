@@ -15,6 +15,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!frontend/lib/
 lib64/
 parts/
 sdist/
@@ -158,3 +159,28 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Project-specific
+server/uploads/
+uploads/
+logs/
+server/logs/
+*.log
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/dist/
+frontend/pnpm-lock.yaml
+
+# Testing/Debug files
+TESTING_GUIDE.md
+SETUP_GUIDE.md
+QUICK_START.md
+DEPENDENCY_FIXES.md
+TWO_STEP_WORKFLOW_GUIDE.md
+setup_dependencies.py
+setup_dependencies.bat
+setup_dependencies.sh

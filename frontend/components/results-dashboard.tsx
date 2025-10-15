@@ -87,6 +87,16 @@ export function ResultsDashboard({ data, onNewFile, onViewReferences }: ResultsD
     ref.parser_used && ref.parser_used.includes('NER')
   ).length
   
+  // Count references with validation changes
+  const withValidationChanges = references.filter(ref => 
+    ref.validation_changes && ref.validation_changes.length > 0
+  ).length
+  
+  // Count total validation changes
+  const totalValidationChanges = references.reduce((total, ref) => 
+    total + (ref.validation_changes?.filter(c => c.type !== 'unchanged').length || 0), 0
+  )
+  
   // Calculate average quality score from individual reference confidence scores
   const avgConfidence = references.length > 0 
     ? references.reduce((sum, ref) => sum + (ref.confidence || 0), 0) / references.length
@@ -225,6 +235,16 @@ export function ResultsDashboard({ data, onNewFile, onViewReferences }: ResultsD
                 </div>
               </CardContent>
             </Card>
+
+            <Card className="bg-gradient-to-br from-emerald-500/5 to-emerald-500/10 border-emerald-500/20">
+              <CardContent className="p-4 text-center">
+                <div className="space-y-2">
+                  <CheckCircle className="h-6 w-6 text-emerald-500 mx-auto" />
+                  <div className="text-2xl font-bold text-emerald-500">{totalValidationChanges}</div>
+                  <div className="text-xs text-muted-foreground">Fields Improved</div>
+                </div>
+              </CardContent>
+            </Card>
           </div>
 
           {/* Quality Score */}
@@ -285,6 +305,12 @@ export function ResultsDashboard({ data, onNewFile, onViewReferences }: ResultsD
                   <span className="text-sm text-muted-foreground">NER Parsing:</span>
                   <Badge variant="secondary" className="bg-blue-500/10 text-blue-600">
                     {stats.totalReferences > 0 ? Math.round((nerParsed / stats.totalReferences) * 100) : 0}%
+                  </Badge>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-sm text-muted-foreground">Validation Improvements:</span>
+                  <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-600">
+                    {totalValidationChanges} changes
                   </Badge>
                 </div>
                 <div className="flex justify-between items-center">

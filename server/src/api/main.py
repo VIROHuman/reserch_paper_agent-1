@@ -18,13 +18,16 @@ from ..models.schemas import (
     JobStatus,
     JobSubmissionResponse
 )
-from ..utils.api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient, GROBIDClient
+from ..utils.api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient
 from ..utils.pdf_processor import PDFReferenceExtractor
 from ..utils.word_processor import WordDocumentProcessor
 from ..utils.file_handler import FileHandler
 from ..utils.enhanced_parser import EnhancedReferenceParser
 from ..utils.job_manager import job_manager
+from ..utils.validation_service import ValidationService
+from ..utils.enrichment_cache import enrichment_cache
 import xml.etree.ElementTree as ET
+import json
 
 logger.remove()
 
@@ -48,7 +51,7 @@ logger.add(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global pdf_extractor, word_processor, file_handler, grobid_client, enhanced_parser
+    global pdf_extractor, word_processor, file_handler, enhanced_parser, validation_service
     
     logger.info("Starting Research Paper Reference Agent API")
     
@@ -59,9 +62,7 @@ async def lifespan(app: FastAPI):
         file_handler = FileHandler()
         logger.info("✅ File handler initialized")
         
-        # Initialize GROBID client
-        grobid_client = GROBIDClient()
-        logger.info("✅ GROBID client initialized")
+        # GROBID removed - using LLM for parsing
         
         # Initialize processors in background
         logger.info("Initializing PDF and Word processors...")
@@ -75,6 +76,11 @@ async def lifespan(app: FastAPI):
         logger.info("Initializing enhanced parser...")
         enhanced_parser = EnhancedReferenceParser()
         logger.info("✅ Enhanced parser initialized")
+        
+        # Initialize validation service
+        logger.info("Initializing validation service...")
+        validation_service = ValidationService(enhanced_parser)
+        logger.info("✅ Validation service initialized")
         
         logger.info("🎉 All utilities initialized successfully")
     except Exception as e:
@@ -104,8 +110,23 @@ app.add_middleware(
 pdf_extractor = None
 word_processor = None
 file_handler = None
-grobid_client = None
 enhanced_parser = None
+validation_service = None
+
+
+def _build_full_names(parsed_ref: dict) -> list:
+    """Build full names from family_names and given_names"""
+    family_names = parsed_ref.get("family_names", [])
+    given_names = parsed_ref.get("given_names", [])
+    
+    full_names = []
+    for i, family in enumerate(family_names):
+        if i < len(given_names) and given_names[i]:
+            full_names.append(f"{given_names[i]} {family}")
+        else:
+            full_names.append(family)
+    
+    return full_names
 
 
 @app.get("/")
@@ -135,12 +156,11 @@ async def health_check():
         message="API is healthy",
         data={
             "status": "healthy",
-            "utilities_initialized": pdf_extractor is not None and word_processor is not None and file_handler is not None and grobid_client is not None and enhanced_parser is not None,
+            "utilities_initialized": pdf_extractor is not None and word_processor is not None and file_handler is not None and enhanced_parser is not None,
             "available_processors": {
                 "pdf_processor": pdf_extractor is not None,
                 "word_processor": word_processor is not None,
                 "file_handler": file_handler is not None,
-                "grobid_client": grobid_client is not None,
                 "enhanced_parser": enhanced_parser is not None
             }
         }
@@ -234,6 +254,7 @@ async def upload_pdf(
                             "extracted_fields": {
                                 "family_names": parsed_ref.get("family_names", []),
                                 "given_names": parsed_ref.get("given_names", []),
+                                "full_names": _build_full_names(parsed_ref),
                                 "year": parsed_ref.get("year"),
                                 "title": parsed_ref.get("title"),
                                 "journal": parsed_ref.get("journal"),
@@ -914,6 +935,317 @@ async def get_supported_paper_types():
             "supported_file_types": ["pdf", "docx", "doc"],
             "description": "Auto-detection attempts to identify paper type from content"
         }
+    )
+
+
+# ===== NEW: Two-Step Workflow Endpoints =====
+
+@app.post("/parse-references", response_model=APIResponse)
+async def parse_references_only(
+    file: UploadFile = File(...),
+    paper_type: str = Form("auto")
+):
+    """
+    Step 1: Extract and parse references without API enrichment
+    Returns batch_id for later validation
+    """
+    try:
+        start_time = time.time()
+        
+        if not file_handler or not pdf_extractor or not word_processor or not enhanced_parser:
+            raise HTTPException(status_code=500, detail="Processors not initialized")
+        
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No file provided")
+        
+        allowed_extensions = {'.pdf', '.docx', '.doc'}
+        file_extension = '.' + file.filename.split('.')[-1].lower()
+        
+        if file_extension not in allowed_extensions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type. Allowed types: {', '.join(allowed_extensions)}"
+            )
+        
+        logger.info(f"📄 Parsing references from {file.filename} (no enrichment)")
+        
+        file_path = await file_handler.save_uploaded_file(file)
+        file_type = file_handler.get_file_type(file_path)
+        
+        try:
+            # Extract references from document
+            if file_type == 'pdf':
+                processing_result = await pdf_extractor.process_pdf_with_extraction(
+                    file_path, paper_type, enable_api_enrichment=False
+                )
+            elif file_type == 'word':
+                processing_result = await word_processor.process_word_document(
+                    file_path, paper_type
+                )
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported file type: {file_type}")
+            
+            if not processing_result["success"]:
+                return APIResponse(
+                    success=False,
+                    message=f"Document processing failed: {processing_result['error']}",
+                    data={"file_info": {"filename": file.filename, "size": file.size, "type": file_type}}
+                )
+            
+            references = processing_result["references"]
+            
+            if not references:
+                return APIResponse(
+                    success=False,
+                    message=f"No references found in {file_type.upper()} document",
+                    data={
+                        "file_info": {"filename": file.filename, "size": file.size, "type": file_type},
+                        "paper_type": paper_type
+                    }
+                )
+            
+            # Format references for API response
+            logger.info(f"📦 Formatting {len(references)} parsed references...")
+            parsed_results = []
+            
+            for i, ref in enumerate(references):
+                try:
+                    # Check if reference is already parsed (from PDF processor)
+                    if isinstance(ref, dict) and "parsed" in ref:
+                        # Already parsed by PDF processor!
+                        parsed_ref = ref["parsed"]
+                        ref_text = ref.get("raw", "")
+                        logger.debug(f"✅ Using pre-parsed ref #{i}")
+                    else:
+                        # Need to parse (for Word docs or other formats)
+                        if isinstance(ref, dict) and "raw" in ref:
+                            ref_text = ref["raw"]
+                        elif isinstance(ref, str):
+                            ref_text = ref
+                        else:
+                            ref_text = str(ref)
+                        
+                        logger.debug(f"📝 Parsing ref #{i} WITHOUT API enrichment")
+                        parsed_ref = await enhanced_parser.parse_reference_enhanced(
+                            ref_text,
+                            enable_api_enrichment=False
+                        )
+                    
+                    tagged_output = enhanced_parser.generate_tagged_output(parsed_ref, i)
+                    
+                    parsed_results.append({
+                        "index": i,
+                        "original_text": ref_text,
+                        "parser_used": parsed_ref.get("parser_used", "unknown"),
+                        "extracted_fields": {
+                            "family_names": parsed_ref.get("family_names", []),
+                            "given_names": parsed_ref.get("given_names", []),
+                            "year": parsed_ref.get("year"),
+                            "title": parsed_ref.get("title"),
+                            "journal": parsed_ref.get("journal"),
+                            "doi": parsed_ref.get("doi"),
+                            "pages": parsed_ref.get("pages"),
+                            "publisher": parsed_ref.get("publisher"),
+                            "url": parsed_ref.get("url")
+                        },
+                        "quality_metrics": {
+                            "initial_quality_score": parsed_ref.get("initial_quality_score", 0)
+                        },
+                        "missing_fields": parsed_ref.get("missing_fields", []),
+                        "tagged_output": tagged_output
+                    })
+                    
+                except Exception as e:
+                    logger.error(f"Error formatting reference {i}: {str(e)}")
+                    ref_text = ref.get("raw", "") if isinstance(ref, dict) else str(ref)
+                    parsed_results.append({
+                        "index": i,
+                        "original_text": ref_text,
+                        "parser_used": "error",
+                        "error": str(e)
+                    })
+            
+            # Calculate statistics
+            end_time = time.time()
+            processing_time = f"{int((end_time - start_time) // 60)}m {int((end_time - start_time) % 60)}s"
+            
+            successful_parsing = len([r for r in parsed_results if "error" not in r])
+            total_extracted_fields = sum(
+                len([v for v in r.get("extracted_fields", {}).values() if v])
+                for r in parsed_results if "error" not in r
+            )
+            total_missing_fields = sum(
+                len(r.get("missing_fields", []))
+                for r in parsed_results if "error" not in r
+            )
+            
+            # Create batch for validation
+            file_info = {
+                "filename": file.filename,
+                "size": file.size,
+                "type": file_type,
+                "paper_type": paper_type
+            }
+            
+            batch_id = job_manager.create_parsed_batch(file_info, parsed_results)
+            
+            return APIResponse(
+                success=True,
+                message=f"Successfully parsed {successful_parsing}/{len(references)} references",
+                data={
+                    "batch_id": batch_id,
+                    "file_info": file_info,
+                    "processing_time": processing_time,
+                    "summary": {
+                        "total_references": len(references),
+                        "successfully_parsed": successful_parsing,
+                        "total_extracted_fields": total_extracted_fields,
+                        "total_missing_fields": total_missing_fields,
+                        "needs_validation": sum(
+                            1 for r in parsed_results
+                            if validation_service.needs_validation(r.get("extracted_fields", {}))
+                        )
+                    },
+                    "parsed_references": parsed_results
+                }
+            )
+            
+        finally:
+            file_handler.cleanup_file(file_path)
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Parse-only error: {str(e)}")
+        return APIResponse(
+            success=False,
+            message=f"Failed to parse references: {str(e)}",
+            data={"error": str(e)}
+        )
+
+
+@app.get("/batch/{batch_id}", response_model=APIResponse)
+async def get_batch_info(batch_id: str):
+    """
+    Get information about a parsed batch
+    """
+    try:
+        batch = job_manager.get_parsed_batch(batch_id)
+        
+        if not batch:
+            raise HTTPException(status_code=404, detail="Batch not found")
+        
+        return APIResponse(
+            success=True,
+            message="Batch information retrieved",
+            data=batch.to_dict()
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving batch: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/validate-batch/{batch_id}")
+async def validate_batch_streaming(
+    batch_id: str,
+    mode: str = Form("standard"),  # quick, standard, thorough
+    selected_indices: str = Form(None)  # JSON array of indices
+):
+    """
+    Step 2: Validate/enrich references with API calls (streaming)
+    
+    Modes:
+    - quick: Only validate references missing DOI
+    - standard: Validate references that need enrichment (default)
+    - thorough: Validate all references
+    """
+    try:
+        if not validation_service:
+            raise HTTPException(status_code=500, detail="Validation service not initialized")
+        
+        batch = job_manager.get_parsed_batch(batch_id)
+        if not batch:
+            raise HTTPException(status_code=404, detail="Batch not found")
+        
+        logger.info(f"🔬 Starting validation for batch {batch_id} (mode: {mode})")
+        
+        # Parse selected indices if provided
+        indices = None
+        if selected_indices:
+            try:
+                indices = json.loads(selected_indices)
+            except:
+                pass
+        
+        # Update batch status
+        job_manager.update_batch_validation_status(batch_id, "validating")
+        
+        # Stream validation progress
+        async def generate():
+            try:
+                async for event in validation_service.validate_batch_with_progress(
+                    batch.parsed_references,
+                    mode=mode,
+                    selected_indices=indices
+                ):
+                    # Send event as JSON
+                    yield f"data: {json.dumps(event)}\n\n"
+                    
+                    # Store final results
+                    if event.get("type") == "complete":
+                        job_manager.update_batch_validation_status(
+                            batch_id,
+                            "validated",
+                            event.get("results")
+                        )
+                        
+            except Exception as e:
+                logger.error(f"Validation streaming error: {str(e)}")
+                job_manager.update_batch_validation_status(batch_id, "failed")
+                error_event = {
+                    "type": "error",
+                    "message": f"Validation failed: {str(e)}"
+                }
+                yield f"data: {json.dumps(error_event)}\n\n"
+        
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Validation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/cache-stats", response_model=APIResponse)
+async def get_cache_stats():
+    """Get enrichment cache statistics"""
+    return APIResponse(
+        success=True,
+        message="Cache statistics",
+        data=enrichment_cache.get_stats()
+    )
+
+
+@app.post("/cache-clear", response_model=APIResponse)
+async def clear_cache():
+    """Clear the enrichment cache"""
+    enrichment_cache.clear()
+    return APIResponse(
+        success=True,
+        message="Cache cleared successfully",
+        data={}
     )
 
 

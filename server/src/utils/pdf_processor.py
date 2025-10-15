@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional
 from loguru import logger
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from .api_clients import GROBIDClient
+# GROBIDClient removed - using LLM for parsing
 from .enhanced_parser import EnhancedReferenceParser
 
 try:
@@ -24,12 +24,12 @@ class PDFReferenceExtractor:
         self.executor = ThreadPoolExecutor(max_workers=2)
         self.nlp = None
         self._load_spacy_model()
-        self.grobid_client = GROBIDClient()
+        # GROBIDClient removed - using LLM for parsing
         self.enhanced_parser = EnhancedReferenceParser()
         
     def _load_spacy_model(self):
         if not SPACY_AVAILABLE:
-            logger.warning("spaCy not available. GROBID will be used for all processing.")
+            logger.warning("spaCy not available. LLM parsing will be used for all processing.")
             self.nlp = None
             return
             
@@ -50,54 +50,12 @@ class PDFReferenceExtractor:
         self,
         pdf_path: str,
         paper_type: str = "ACL",
-        use_grobid: bool = True
+        enable_api_enrichment: bool = True
     ) -> Dict[str, Any]:
-        """Process PDF and extract references with GROBID as primary method"""
+        """Process PDF and extract references with LLM-powered parsing"""
         try:
-            # Try GROBID first for better accuracy
-            if use_grobid:
-                try:
-                    logger.info("🔬 Attempting GROBID processing first...")
-                    grobid_result = await self.grobid_client.process_pdf_document(pdf_path)
-                    
-                    if grobid_result.get("success") and grobid_result.get("references"):
-                        logger.info(f"✅ GROBID processing successful: {grobid_result['reference_count']} references found")
-                        
-                        # Convert GROBID references to expected format with API enrichment
-                        formatted_references = []
-                        for ref in grobid_result["references"]:
-                            # Use GROBID data as base, enrich with API data for missing fields
-                            enriched_ref = await self._enrich_grobid_reference_with_apis(ref)
-                            formatted_references.append({
-                                "raw": self._format_reference_from_grobid(ref),
-                                "parsed": enriched_ref
-                            })
-                        
-                        # Extract paper metadata from GROBID or fallback to local extraction
-                        paper_data = grobid_result.get("document_metadata", {})
-                        if not paper_data:
-                            paper_data = await asyncio.get_event_loop().run_in_executor(
-                                self.executor,
-                                self._extract_paper_metadata,
-                                pdf_path
-                            )
-                        
-                        return {
-                            "success": True,
-                            "paper_data": paper_data,
-                            "references": formatted_references,
-                            "reference_count": len(formatted_references),
-                            "paper_type": paper_type,
-                            "processing_method": "grobid"
-                        }
-                    else:
-                        logger.warning("⚠️ GROBID processing failed, falling back to local extraction")
-                        
-                except Exception as e:
-                    logger.warning(f"⚠️ GROBID processing error: {str(e)}, falling back to local extraction")
-            
-            # Fallback to enhanced parser with local extraction
-            logger.info("📄 Using enhanced parser with local PDF extraction...")
+            mode = "with API enrichment" if enable_api_enrichment else "WITHOUT API enrichment (parsing only)"
+            logger.info(f"📄 Using enhanced parser {mode}...")
             
             # Extract raw text first
             raw_references = await asyncio.get_event_loop().run_in_executor(
@@ -111,7 +69,10 @@ class PDFReferenceExtractor:
             for ref in raw_references:
                 try:
                     # Use enhanced parser to improve the reference
-                    enhanced_ref = await self.enhanced_parser.parse_reference_enhanced(ref.get("raw", ""))
+                    enhanced_ref = await self.enhanced_parser.parse_reference_enhanced(
+                        ref.get("raw", ""),
+                        enable_api_enrichment=enable_api_enrichment
+                    )
                     formatted_references.append({
                         "raw": ref.get("raw", ""),
                         "parsed": enhanced_ref
@@ -135,7 +96,7 @@ class PDFReferenceExtractor:
                 "references": formatted_references,
                 "reference_count": len(formatted_references),
                 "paper_type": paper_type,
-                "processing_method": "enhanced_parser"
+                "processing_method": "llm_enhanced_parser"
             }
                 
         except Exception as e:

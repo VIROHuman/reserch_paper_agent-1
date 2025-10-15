@@ -21,9 +21,15 @@ interface FileValidationError {
 
 interface FileUploadSectionProps {
   onFileProcess: (file: File, useStreaming?: boolean) => void
+  buttonText?: string
+  buttonIcon?: React.ReactNode
 }
 
-export function FileUploadSection({ onFileProcess }: FileUploadSectionProps) {
+export function FileUploadSection({ 
+  onFileProcess, 
+  buttonText = "Process File",
+  buttonIcon 
+}: FileUploadSectionProps) {
   const [uploadedFile, setUploadedFile] = useState<UploadedFile | null>(null)
   const [isUploading, setIsUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
@@ -264,15 +270,26 @@ export function FileUploadSection({ onFileProcess }: FileUploadSectionProps) {
                 className="w-full" 
                 size="lg" 
                 disabled={isUploading}
-                onClick={() => uploadedFile && onFileProcess(uploadedFile.file, true)}
+                onClick={() => {
+                  console.log("[DEBUG] Parse button clicked, isUploading:", isUploading, "uploadedFile:", uploadedFile)
+                  if (uploadedFile && !isUploading) {
+                    console.log("[DEBUG] Calling onFileProcess with file:", uploadedFile.file.name)
+                    onFileProcess(uploadedFile.file, true)
+                  } else {
+                    console.log("[DEBUG] Button click blocked - isUploading or no file")
+                  }
+                }}
               >
                 {isUploading ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Uploading...
+                    Uploading... ({uploadProgress}%)
                   </>
                 ) : (
-                  "Process References"
+                  <>
+                    {buttonIcon && <span className="mr-2">{buttonIcon}</span>}
+                    {buttonText}
+                  </>
                 )}
               </Button>
             </div>

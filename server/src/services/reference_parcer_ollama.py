@@ -3,6 +3,23 @@ from typing import List, Optional, Dict, Any, Tuple
 from pydantic import BaseModel, Field
 from collections import defaultdict
 import json
+import requests
+import re
+import sys
+from loguru import logger
+
+# Import preprocessor
+try:
+    from ..utils.reference_preprocessor import preprocess_reference
+    PREPROCESSOR_AVAILABLE = True
+except ImportError:
+    PREPROCESSOR_AVAILABLE = False
+    def preprocess_reference(text):
+        return text  # No-op if not available
+
+# Fix encoding issues on Windows
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding='utf-8')
 
 
 class Author(BaseModel):
@@ -33,14 +50,24 @@ class ReferenceData(BaseModel):
 
 class AdvancedNERParser:
     """
-    Pure NER implementation with advanced entity handling.
-    No regex fallbacks - tests raw model capability.
+    NER implementation with LLM fallback for improved accuracy.
+    Uses NER as primary (fast), falls back to LLM when results are suspicious.
     """
     
+    # Common date abbreviations that get misclassified as authors
+    DATE_ABBREVIATIONS = {
+        'jan', 'feb', 'mar', 'apr', 'may', 'jun',
+        'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+        'january', 'february', 'march', 'april', 'june',
+        'july', 'august', 'september', 'october', 'november', 'december'
+    }
+    
     def __init__(self, 
-                 confidence_threshold: float = 0.5,
+                 confidence_threshold: float = 0.1,  # Lowered to 0.1 to catch more entities
                  enable_entity_disambiguation: bool = True,
-                 enable_confidence_weighting: bool = True):
+                 enable_confidence_weighting: bool = True,
+                 use_llm_primary: bool = False,  # Disabled for fast parsing; LLM used during validation
+                 ollama_base_url: str = "http://localhost:11434"):
         
         # Try to load the NER model with fallback
         try:
@@ -62,6 +89,8 @@ class AdvancedNERParser:
         self.confidence_threshold = confidence_threshold
         self.enable_disambiguation = enable_entity_disambiguation
         self.enable_confidence_weighting = enable_confidence_weighting
+        self.use_llm_primary = use_llm_primary  # Use LLM as primary, not fallback
+        self.ollama_base_url = ollama_base_url
         
         # Entity type mappings
         self.entity_mappings = {
@@ -70,10 +99,165 @@ class AdvancedNERParser:
             'PAGE_LAST': 'PAGES',
             'LINK_ONLINE_AVAILABILITY': 'URL',
         }
+        
+        # Test Ollama availability
+        self.llm_available = self._test_ollama_connection()
     
     def _normalize_entity_type(self, entity_type: str) -> str:
         """Normalize entity types to canonical forms"""
         return self.entity_mappings.get(entity_type, entity_type)
+    
+    def _test_ollama_connection(self) -> bool:
+        """Test if Ollama is available"""
+        if not self.use_llm_primary:
+            return False
+        
+        try:
+            response = requests.get(
+                f"{self.ollama_base_url}/api/tags",
+                timeout=2
+            )
+            if response.status_code == 200:
+                print("✅ Ollama LLM ready for primary parsing")
+                return True
+        except Exception:
+            pass
+        
+        print("⚠️ Ollama not available - falling back to NER only")
+        return False
+    
+    def _filter_false_positive_authors(self, authors: List[Author]) -> List[Author]:
+        """Remove common false positives from author list"""
+        filtered = []
+        
+        for author in authors:
+            # Get text to check (full_name, surname, or first_name)
+            check_text = (author.full_name or author.surname or author.first_name or "").lower().strip()
+            
+            # Skip if empty
+            if not check_text:
+                continue
+            
+            # Skip if it's a date abbreviation
+            if check_text in self.DATE_ABBREVIATIONS:
+                print(f"🔍 Filtered false positive author: '{check_text}'")
+                continue
+            
+            # Skip if it's just numbers or too short
+            if len(check_text) < 2 or check_text.isdigit():
+                continue
+            
+            filtered.append(author)
+        
+        return filtered
+    
+    def _should_use_llm_fallback(self, authors: List[Author], raw_text: str, confidence: float) -> bool:
+        """Detect if NER results are suspicious and need LLM fallback"""
+        if not self.llm_available:
+            return False
+        
+        # Trigger 1: No authors extracted but "and" appears
+        and_count = raw_text.lower().count(' and ')
+        if len(authors) == 0 and and_count >= 1:
+            print(f"🔍 LLM fallback: No authors but '{and_count}' 'and' detected")
+            return True
+        
+        # Trigger 2: Merged authors detected (full_name contains multiple commas)
+        # This happens when NER extracts "Smith, J., Jones, P., Brown, M." as ONE author
+        for author in authors:
+            full_name = author.full_name or ""
+            comma_count = full_name.count(',')
+            if comma_count >= 2:  # "Smith, J., Jones, P." has 2+ commas = merged authors
+                print(f"🔍 LLM fallback: Merged authors detected ('{full_name[:50]}...')")
+                return True
+        
+        # Trigger 3: Very few authors but lots of commas (likely missed splits)
+        # Count expected authors from commas and "and"
+        comma_count = raw_text.count(',')
+        # Heuristic: if commas > authors * 3, likely still merged
+        # Raised threshold to 3x to avoid false positives
+        if len(authors) > 0 and comma_count > len(authors) * 3:
+            print(f"🔍 LLM fallback: {len(authors)} authors but {comma_count} commas detected")
+            return True
+        
+        # Trigger 4: Low confidence
+        if confidence < 0.4 and len(authors) < 3:
+            print(f"🔍 LLM fallback: Low confidence ({confidence:.2f}) with few authors")
+            return True
+        
+        # Trigger 5: Contains suspicious patterns (date abbreviations in author text)
+        for author in authors:
+            author_text = (author.full_name or author.surname or "").lower()
+            if any(date_abbr in author_text.split() for date_abbr in self.DATE_ABBREVIATIONS):
+                print(f"🔍 LLM fallback: Date abbreviation in authors")
+                return True
+        
+        return False
+    
+    def _extract_authors_with_llm(self, raw_citation: str) -> List[Author]:
+        """Use LLM to extract authors from citation"""
+        try:
+            prompt = f"""Extract ONLY the author names from this academic citation. Return them as a JSON array of objects with "full_name", "surname", and "first_name" fields.
+
+Citation: {raw_citation}
+
+Rules:
+- Extract ALL author names
+- Do NOT include month abbreviations (Jan, Feb, etc.) as authors
+- Do NOT include years, journal names, or other metadata
+- If a name has format "Surname, FirstName" use that structure
+- If a name has format "FirstName Surname" use that structure
+
+Return ONLY valid JSON array, nothing else. Example format:
+[{{"full_name": "John Smith", "surname": "Smith", "first_name": "John"}}]"""
+
+            response = requests.post(
+                f"{self.ollama_base_url}/api/generate",
+                json={
+                    "model": "llama3:latest",
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,
+                        "top_p": 0.9
+                    }
+                },
+                timeout=30
+            )
+            
+            if response.status_code != 200:
+                print(f"❌ LLM request failed: {response.status_code}")
+                return []
+            
+            result = response.json()
+            llm_output = result.get('response', '').strip()
+            
+            # Extract JSON from response (sometimes LLM adds extra text)
+            json_match = re.search(r'\[.*\]', llm_output, re.DOTALL)
+            if not json_match:
+                print(f"⚠️ No JSON found in LLM output")
+                return []
+            
+            authors_data = json.loads(json_match.group(0))
+            
+            # Convert to Author objects
+            authors = []
+            for author_dict in authors_data:
+                authors.append(Author(
+                    full_name=author_dict.get('full_name'),
+                    surname=author_dict.get('surname'),
+                    first_name=author_dict.get('first_name')
+                ))
+            
+            print(f"✅ LLM extracted {len(authors)} authors")
+            return authors
+            
+        except json.JSONDecodeError as e:
+            print(f"❌ JSON decode error from LLM: {e}")
+            return []
+        except Exception as e:
+            print(f"❌ LLM extraction failed: {e}")
+            return []
     
     def _extract_raw_entities(self, text: str) -> List[Dict[str, Any]]:
         """Extract entities with position information"""
@@ -85,15 +269,38 @@ class AdvancedNERParser:
             ent['text'] = ent['word'].strip()
             ent['confidence'] = ent.get('score', 1.0)
         
+        # DEBUG: Log what NER actually detected
+        if entities:
+            logger.info(f"🔍 NER detected {len(entities)} entities:")
+            for ent in entities[:10]:  # Show first 10
+                logger.info(f"   {ent['entity_group']:<15} | {ent['text']:<30} | confidence: {ent['confidence']:.3f}")
+            if len(entities) > 10:
+                logger.info(f"   ... and {len(entities) - 10} more")
+        
         return entities
     
     def _group_entities_by_type(self, entities: List[Dict]) -> Dict[str, List[Dict]]:
         """Group entities by normalized type with confidence filtering"""
         grouped = defaultdict(list)
+        filtered_out = []
         
         for ent in entities:
             if ent['confidence'] >= self.confidence_threshold:
                 grouped[ent['normalized_type']].append(ent)
+            else:
+                filtered_out.append(ent)
+        
+        # DEBUG: Show what was filtered out
+        if filtered_out:
+            logger.info(f"⚠️  Filtered out {len(filtered_out)} entities below threshold {self.confidence_threshold}:")
+            for ent in filtered_out[:5]:  # Show first 5
+                logger.info(f"   {ent['normalized_type']:<15} | {ent['text']:<30} | confidence: {ent['confidence']:.3f}")
+        
+        # DEBUG: Show what passed
+        if grouped:
+            logger.info(f"✅ Kept {sum(len(v) for v in grouped.values())} entities:")
+            for entity_type, ents in grouped.items():
+                logger.info(f"   {entity_type}: {len(ents)} entities")
         
         return dict(grouped)
     
@@ -139,61 +346,118 @@ class AdvancedNERParser:
     
     def _parse_author_string(self, author_text: str, confidence: float) -> List[Author]:
         """
-        Advanced: Parse complex author strings using linguistic patterns.
-        No regex - pure string analysis.
+        Parse author strings, handling merged authors like "Gu Y, Tinn R, Cheng H"
+        Handles: single initials, multiple initials, 3+ word names, 5+ authors
         """
+        logger.info(f"📝 Parsing author string: '{author_text}'")
+        
         if not author_text:
+            return []
+        
+        # CLEAN: Remove reference numbers like [26] or 27] at the start
+        author_text = re.sub(r'^\s*\[?\d+\]\s*', '', author_text)
+        
+        # CLEAN: Remove title fragments (anything after a period followed by a capital letter)
+        # E.g., "Lan Z, Chen M. Albert:" -> "Lan Z, Chen M"
+        author_text = re.sub(r'\.\s*[A-Z][a-z]+.*$', '', author_text)
+        
+        logger.info(f"📝 After cleaning: '{author_text}'")
+        
+        # Final check
+        if not author_text or len(author_text) < 2:
             return []
         
         authors = []
         
-        # Split on common delimiters using string methods
-        parts = []
-        for delimiter in [' and ', '; ', ' & ']:
-            if delimiter in author_text:
-                parts = author_text.split(delimiter)
-                break
+        # Remove " et al" and similar
+        author_text = re.sub(r',?\s*(et\s+al\.?|and\s+others).*$', '', author_text, flags=re.IGNORECASE)
         
-        if not parts:
-            parts = [author_text]
+        # First, split on " and " or " & " to handle those delimiters
+        and_parts = re.split(r'\s+(?:and|&)\s+', author_text)
         
-        for part in parts:
-            part = part.strip().rstrip(',').rstrip('.').strip()
-            if not part:
+        for and_part in and_parts:
+            and_part = and_part.strip()
+            if not and_part:
                 continue
             
-            # Analyze comma presence for format detection
-            if ',' in part:
-                # Likely "Surname, FirstName" format
-                segments = part.split(',')
-                surname = segments[0].strip()
-                first_name = segments[1].strip() if len(segments) > 1 else None
+            # Check if this looks like merged authors by counting commas
+            comma_count = and_part.count(',')
+            
+            if comma_count >= 2:
+                # Likely merged authors: "Gu Y, Tinn R, Cheng H" or "Smith, J., Jones, P."
+                # 
+                # IMPROVED PATTERN:
+                # Split on comma when followed by:
+                # 1. Capital letter + lowercase (surname start): ", Smith"
+                # 2. Capital letter + space + capital (initial + surname): ", Y Tinn"
+                # 3. Capital letter alone or with period (surname alone): ", Y," or ", Y"
+                #
+                # Pattern explanation:
+                # (?=[A-Z](?:[a-z]|\s+[A-Z]|[,\s]|$))
+                # - [A-Z] = starts with capital
+                # - (?:[a-z]|\s+[A-Z]|[,\s]|$) = followed by lowercase OR space+capital OR comma/space/end
                 
-                authors.append(Author(
-                    first_name=first_name,
-                    surname=surname,
-                    full_name=part
-                ))
+                parts = re.split(r',\s+(?=[A-Z](?:[a-z]|\s+[A-Z]|[,\s]|$))', and_part)
+                
+                for part in parts:
+                    part = part.strip().rstrip(',')
+                    if part and len(part) > 1:  # Skip empty or single char
+                        author = self._parse_single_author(part)
+                        if author.surname or author.first_name:  # Valid author
+                            authors.append(author)
             else:
-                # Likely "FirstName Surname" format
-                tokens = part.split()
-                if len(tokens) >= 2:
-                    # Last token is surname
-                    surname = tokens[-1]
-                    first_name = ' '.join(tokens[:-1])
-                    
-                    authors.append(Author(
-                        first_name=first_name,
-                        surname=surname,
-                        full_name=part
-                    ))
-                else:
-                    # Single name - treat as full name
-                    authors.append(Author(
-                        full_name=part
-                    ))
+                # Single author or simple format
+                author = self._parse_single_author(and_part)
+                if author.surname or author.first_name:
+                    authors.append(author)
+        
+        # Limit to reasonable number (no hard limit, but log if excessive)
+        if len(authors) > 20:
+            logger.warning(f"⚠️ Extracted {len(authors)} authors, which seems excessive")
+        
+        logger.info(f"✅ Parsed {len(authors)} authors:")
+        for i, author in enumerate(authors):
+            logger.info(f"   Author {i+1}: first_name='{author.first_name}', surname='{author.surname}', full_name='{author.full_name}'")
         
         return authors
+    
+    def _parse_single_author(self, author_text: str) -> Author:
+        """
+        Parse a single author name
+        Handles: "Surname, F.", "Surname F", "FirstName MiddleName Surname", "F. M. Surname"
+        """
+        author_text = author_text.strip().rstrip(',').rstrip('.').strip()
+        
+        # Handle empty
+        if not author_text or len(author_text) < 2:
+            return Author(first_name="", surname="", full_name="")
+        
+        if ',' in author_text:
+            # "Surname, FirstName" format
+            segments = author_text.split(',', 1)
+            surname = segments[0].strip()
+            first_name = segments[1].strip() if len(segments) > 1 else None
+            
+            return Author(
+                first_name=first_name,
+                surname=surname,
+                full_name=author_text
+            )
+        else:
+            # "FirstName Surname" format
+            tokens = author_text.split()
+            if len(tokens) >= 2:
+                surname = tokens[-1]
+                first_name = ' '.join(tokens[:-1])
+                
+                return Author(
+                    first_name=first_name,
+                    surname=surname,
+                    full_name=author_text
+                )
+            else:
+                # Single name
+                return Author(full_name=author_text)
     
     def _infer_publication_type(self, 
                                 journal: Optional[str],
@@ -259,12 +523,18 @@ class AdvancedNERParser:
         """
         Main parsing method - uses NER if available, otherwise regex fallback
         """
+        # Step 1: Preprocess the text for better NER accuracy
+        if PREPROCESSOR_AVAILABLE:
+            preprocessed_citation = preprocess_reference(raw_citation)
+        else:
+            preprocessed_citation = raw_citation
+        
         if not self.model_available or not self.parser:
             # Use regex-based fallback parsing
-            return self._regex_fallback_parsing(raw_citation)
+            return self._regex_fallback_parsing(preprocessed_citation)
         
-        # Stage 1: Extract raw entities
-        raw_entities = self._extract_raw_entities(raw_citation)
+        # Stage 1: Extract raw entities from PREPROCESSED text
+        raw_entities = self._extract_raw_entities(preprocessed_citation)
         
         # Stage 2: Group and filter by type
         grouped = self._group_entities_by_type(raw_entities)
@@ -295,15 +565,46 @@ class AdvancedNERParser:
                 result_data['title'] = title_entity['text']
                 result_data['confidence_scores']['title'] = float(title_entity['confidence'])
         
-        # Authors
-        if 'AUTHORS' in grouped:
-            author_entity = self._resolve_conflicts(grouped['AUTHORS'])
-            if author_entity:
-                result_data['authors'] = self._parse_author_string(
-                    author_entity['text'],
-                    author_entity['confidence']
-                )
-                result_data['confidence_scores']['authors'] = float(author_entity['confidence'])
+        # Authors - LLM PRIMARY for 100% accuracy
+        author_confidence = 0.0
+        
+        # STRATEGY: Use LLM first for maximum accuracy
+        if self.llm_available:
+            # Try LLM first (primary method)
+            llm_authors = self._extract_authors_with_llm(raw_citation)
+            if llm_authors:
+                # Filter false positives
+                llm_authors = self._filter_false_positive_authors(llm_authors)
+                result_data['authors'] = llm_authors
+                result_data['confidence_scores']['authors'] = 0.95  # High confidence with LLM
+                result_data['ambiguity_flags'].append('llm_primary_extraction')
+            else:
+                # LLM failed, fallback to NER
+                print("⚠️ LLM extraction failed, using NER fallback...")
+                if 'AUTHORS' in grouped:
+                    author_entity = self._resolve_conflicts(grouped['AUTHORS'])
+                    if author_entity:
+                        ner_authors = self._parse_author_string(
+                            author_entity['text'],
+                            author_entity['confidence']
+                        )
+                        filtered_authors = self._filter_false_positive_authors(ner_authors)
+                        result_data['authors'] = filtered_authors
+                        result_data['confidence_scores']['authors'] = float(author_entity['confidence'])
+                        result_data['ambiguity_flags'].append('ner_fallback_used')
+        else:
+            # LLM not available, use NER only
+            if 'AUTHORS' in grouped:
+                author_entity = self._resolve_conflicts(grouped['AUTHORS'])
+                if author_entity:
+                    ner_authors = self._parse_author_string(
+                        author_entity['text'],
+                        author_entity['confidence']
+                    )
+                    filtered_authors = self._filter_false_positive_authors(ner_authors)
+                    result_data['authors'] = filtered_authors
+                    result_data['confidence_scores']['authors'] = float(author_entity['confidence'])
+                    result_data['ambiguity_flags'].append('ner_only')
         
         # Year
         if 'YEAR' in grouped:

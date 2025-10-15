@@ -2,10 +2,64 @@ import httpx
 import requests
 import asyncio
 from typing import List, Dict, Any, Optional
+from datetime import datetime, timedelta
 from loguru import logger
 
 from ..config import settings
 from ..models.schemas import CrossRefResponse, OpenAlexResponse, SemanticScholarResponse, ReferenceData, Author
+
+
+class CircuitBreaker:
+    """Circuit breaker to temporarily disable failing APIs"""
+    
+    def __init__(self, failure_threshold: int = 3, timeout_duration: int = 300):
+        self.failure_threshold = failure_threshold
+        self.timeout_duration = timeout_duration  # seconds to wait before retrying
+        self.failures = {}  # API name -> failure count
+        self.disabled_until = {}  # API name -> datetime when to re-enable
+    
+    def record_failure(self, api_name: str):
+        """Record a failure for an API"""
+        self.failures[api_name] = self.failures.get(api_name, 0) + 1
+        
+        if self.failures[api_name] >= self.failure_threshold:
+            self.disabled_until[api_name] = datetime.now() + timedelta(seconds=self.timeout_duration)
+            logger.warning(f"🚫 Circuit breaker: {api_name} disabled for {self.timeout_duration}s after {self.failures[api_name]} failures")
+    
+    def record_success(self, api_name: str):
+        """Record a success for an API (resets failure count)"""
+        if api_name in self.failures:
+            self.failures[api_name] = 0
+        if api_name in self.disabled_until:
+            del self.disabled_until[api_name]
+    
+    def is_available(self, api_name: str) -> bool:
+        """Check if an API is available (not disabled by circuit breaker)"""
+        if api_name not in self.disabled_until:
+            return True
+        
+        if datetime.now() > self.disabled_until[api_name]:
+            # Timeout expired, re-enable the API
+            del self.disabled_until[api_name]
+            self.failures[api_name] = 0
+            logger.info(f"✅ Circuit breaker: {api_name} re-enabled")
+            return True
+        
+        return False
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get circuit breaker status for all APIs"""
+        return {
+            "failures": self.failures.copy(),
+            "disabled_apis": {
+                api: (disabled_until - datetime.now()).total_seconds()
+                for api, disabled_until in self.disabled_until.items()
+            }
+        }
+
+
+# Global circuit breaker instance
+circuit_breaker = CircuitBreaker(failure_threshold=3, timeout_duration=300)
 
 
 class CrossRefClient:
@@ -20,6 +74,13 @@ class CrossRefClient:
             self.headers["Authorization"] = f"Bearer {settings.crossref_api_key}"
     
     async def search_reference(self, query: str, limit: int = 5) -> List[ReferenceData]:
+        api_name = "CrossRef"
+        
+        # Check circuit breaker
+        if not circuit_breaker.is_available(api_name):
+            logger.debug(f"{api_name}: Skipped (circuit breaker open)")
+            return []
+        
         try:
             async with httpx.AsyncClient() as client:
                 params = {
@@ -32,16 +93,21 @@ class CrossRefClient:
                     f"{self.base_url}/works",
                     headers=self.headers,
                     params=params,
-                    timeout=30.0
+                    timeout=None  # No timeout
                 )
-                response.raise_for_status()
                 
-                data = response.json()
-                results = self._parse_crossref_response(data)
-                return results
+                if response.status_code == 200:
+                    data = response.json()
+                    results = self._parse_crossref_response(data)
+                    circuit_breaker.record_success(api_name)
+                    return results
+                
+                circuit_breaker.record_failure(api_name)
+                return []
                 
         except Exception as e:
-            logger.error(f"CrossRef API error: {str(e)}")
+            logger.debug(f"{api_name}: Error - {str(e)}")
+            circuit_breaker.record_failure(api_name)
             return []
     
     def _parse_crossref_response(self, data: Dict[str, Any]) -> List[ReferenceData]:
@@ -95,7 +161,7 @@ class CrossRefClient:
                 response = await client.get(
                     url,
                     headers=self.headers,
-                    timeout=30.0
+                    timeout=None  # No timeout
                 )
                 response.raise_for_status()
                 
@@ -207,6 +273,13 @@ class OpenAlexClient:
         }
     
     async def search_reference(self, query: str, limit: int = 5) -> List[ReferenceData]:
+        api_name = "OpenAlex"
+        
+        # Check circuit breaker
+        if not circuit_breaker.is_available(api_name):
+            logger.debug(f"{api_name}: Skipped (circuit breaker open)")
+            return []
+        
         try:
             async with httpx.AsyncClient() as client:
                 params = {
@@ -219,16 +292,21 @@ class OpenAlexClient:
                     f"{self.base_url}/works",
                     headers=self.headers,
                     params=params,
-                    timeout=30.0
+                    timeout=None  # No timeout
                 )
-                response.raise_for_status()
                 
-                data = response.json()
-                results = self._parse_openalex_response(data)
-                return results
+                if response.status_code == 200:
+                    data = response.json()
+                    results = self._parse_openalex_response(data)
+                    circuit_breaker.record_success(api_name)
+                    return results
+                
+                circuit_breaker.record_failure(api_name)
+                return []
                 
         except Exception as e:
-            logger.error(f"OpenAlex API error: {str(e)}")
+            logger.debug(f"{api_name}: Error - {str(e)}")
+            circuit_breaker.record_failure(api_name)
             return []
     
     def _parse_openalex_response(self, data: Dict[str, Any]) -> List[ReferenceData]:
@@ -297,7 +375,7 @@ class OpenAlexClient:
                 response = await client.get(
                     url,
                     headers=self.headers,
-                    timeout=30.0
+                    timeout=None  # No timeout
                 )
                 response.raise_for_status()
                 
@@ -393,6 +471,13 @@ class SemanticScholarClient:
     
     async def search_reference(self, query: str, limit: int = 5) -> List[ReferenceData]:
         """Search for reference using Semantic Scholar API"""
+        api_name = "SemanticScholar"
+        
+        # Check circuit breaker
+        if not circuit_breaker.is_available(api_name):
+            logger.debug(f"{api_name}: Skipped (circuit breaker open)")
+            return []
+        
         try:
             async with httpx.AsyncClient() as client:
                 params = {
@@ -405,15 +490,21 @@ class SemanticScholarClient:
                     f"{self.base_url}/paper/search",
                     headers=self.headers,
                     params=params,
-                    timeout=30.0
+                    timeout=None  # No timeout
                 )
-                response.raise_for_status()
                 
-                data = response.json()
-                return self._parse_semantic_scholar_response(data)
+                if response.status_code == 200:
+                    data = response.json()
+                    results = self._parse_semantic_scholar_response(data)
+                    circuit_breaker.record_success(api_name)
+                    return results
+                
+                circuit_breaker.record_failure(api_name)
+                return []
                 
         except Exception as e:
-            logger.error(f"Semantic Scholar API error: {str(e)}")
+            logger.debug(f"{api_name}: Error - {str(e)}")
+            circuit_breaker.record_failure(api_name)
             return []
     
     def _parse_semantic_scholar_response(self, data: Dict[str, Any]) -> List[ReferenceData]:
@@ -464,6 +555,13 @@ class DOAJClient:
     
     async def search_reference(self, query: str, limit: int = 5) -> List[ReferenceData]:
         """Search for reference using DOAJ API"""
+        api_name = "DOAJ"
+        
+        # Check circuit breaker
+        if not circuit_breaker.is_available(api_name):
+            logger.debug(f"{api_name}: Skipped (circuit breaker open)")
+            return []
+        
         try:
             async with httpx.AsyncClient() as client:
                 encoded_query = query.replace(" ", "%20")
@@ -471,15 +569,18 @@ class DOAJClient:
                 response = await client.get(
                     f"{self.base_url}/search/articles/{encoded_query}",
                     headers=self.headers,
-                    timeout=30.0
+                    timeout=None  # No timeout
                 )
                 response.raise_for_status()
                 
                 data = response.json()
-                return self._parse_doaj_response(data)
+                results = self._parse_doaj_response(data)
+                circuit_breaker.record_success(api_name)
+                return results
                 
         except Exception as e:
-            logger.error(f"DOAJ API error: {str(e)}")
+            logger.debug(f"{api_name}: Error - {str(e)}")
+            circuit_breaker.record_failure(api_name)
             return []
     
     def _parse_doaj_response(self, data: Dict[str, Any]) -> List[ReferenceData]:
@@ -529,237 +630,168 @@ class DOAJClient:
         return references
 
 
-class GROBIDClient:
-    """Client for GROBID API - specialized for academic document parsing"""
+class PubMedClient:
+    """Client for PubMed/NCBI E-utilities API (no API key required)"""
     
     def __init__(self):
-        self.base_url = settings.grobid_base_url
+        self.base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
         self.headers = {
-            "Accept": "application/xml, text/plain, */*"
+            "User-Agent": "ResearchPaperAgent/1.0"
         }
     
-    async def process_pdf_document(self, pdf_path: str) -> Dict[str, Any]:
-        """Process entire PDF document with GROBID using requests for reliable file uploads"""
+    async def search_reference(self, query: str, limit: int = 5) -> List[ReferenceData]:
+        """Search PubMed for references"""
+        api_name = "PubMed"
+        
+        # Check circuit breaker
+        if not circuit_breaker.is_available(api_name):
+            logger.debug(f"{api_name}: Skipped (circuit breaker open)")
+            return []
+        
         try:
-            logger.info(f"🔬 GROBID: Processing PDF document: {pdf_path}")
+            # Step 1: Search for PMIDs
+            pmids = await self._search_pmids(query, limit)
+            if not pmids:
+                logger.debug(f"{api_name}: No results found for query")
+                circuit_breaker.record_failure(api_name)
+                return []
             
-            # Use requests in a thread pool to avoid blocking the event loop
-            # This ensures immediate file reading and eliminates httpx I/O issues
-            response = await asyncio.to_thread(self._process_pdf_with_requests, pdf_path)
+            # Step 2: Fetch details for PMIDs
+            references = await self._fetch_details(pmids)
+            circuit_breaker.record_success(api_name)
+            return references
             
-            # Debug log for raw XML
-            logger.info(f"🔬 GROBID raw XML response (first 500 chars): {response.text[:500]}")
-            logger.info(f"🔬 GROBID response length: {len(response.text)} characters")
-
-            # Parse XML response
-            result = self._parse_grobid_xml_response(response.text)
-            logger.info(f"🔬 GROBID parsing result: success={result.get('success')}, references={result.get('reference_count', 0)}")
-            return result
-                    
         except Exception as e:
-            logger.error(f"❌ GROBID API error: {str(e)}")
-            return {"success": False, "error": str(e)}
+            logger.debug(f"{api_name}: Error - {str(e)}")
+            circuit_breaker.record_failure(api_name)
+            return []
     
-    def _process_pdf_with_requests(self, pdf_path: str):
-        """Synchronous method using requests for GROBID PDF processing"""
+    async def _search_pmids(self, query: str, limit: int) -> List[str]:
+        """Search PubMed and get PMIDs"""
         try:
-            logger.info(f"🔬 GROBID: Opening PDF file: {pdf_path}")
-            with open(pdf_path, 'rb') as pdf_file:
-                files = {"input": (pdf_path, pdf_file, "application/pdf")}
-                data = {
-                    "consolidateHeader": 1,
-                    "consolidateCitations": 0,
-                    "includeRawCitations": 1,
-                    "includeRawAffiliations": 1
+            async with httpx.AsyncClient() as client:
+                params = {
+                    "db": "pubmed",
+                    "term": query,
+                    "retmax": limit,
+                    "retmode": "json"
                 }
                 
-                logger.info(f"🔬 GROBID: Sending request to {self.base_url}/api/processFulltextDocument")
-                response = requests.post(
-                    f"{self.base_url}/api/processFulltextDocument",
-                    files=files,
-                    data=data,
-                    timeout=120.0
+                response = await client.get(
+                    f"{self.base_url}/esearch.fcgi",
+                    headers=self.headers,
+                    params=params
                 )
-                logger.info(f"🔬 GROBID: Response status: {response.status_code}")
-                response.raise_for_status()
-                return response
-        except Exception as e:
-            logger.error(f"❌ GROBID requests error: {str(e)}")
-            raise
-    
-    async def process_reference_text(self, reference_text: str) -> Optional[ReferenceData]:
-        """Parse individual reference text using GROBID"""
-        try:
-            logger.info(f"🔬 GROBID: Processing reference text: {reference_text[:100]}...")
-            
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                data = {"input": reference_text}
                 
-                response = await client.post(
-                    f"{self.base_url}/api/processReferences",
-                    data=data
+                if response.status_code == 200:
+                    data = response.json()
+                    return data.get("esearchresult", {}).get("idlist", [])
+                return []
+                
+        except Exception as e:
+            logger.debug(f"PubMed search error: {str(e)}")
+            return []
+    
+    async def _fetch_details(self, pmids: List[str]) -> List[ReferenceData]:
+        """Fetch detailed information for PMIDs"""
+        try:
+            async with httpx.AsyncClient() as client:
+                params = {
+                    "db": "pubmed",
+                    "id": ",".join(pmids),
+                    "retmode": "xml"
+                }
+                
+                response = await client.get(
+                    f"{self.base_url}/efetch.fcgi",
+                    headers=self.headers,
+                    params=params
                 )
-                response.raise_for_status()
                 
-                return self._parse_grobid_xml_response(response.text)
+                if response.status_code == 200:
+                    return self._parse_pubmed_xml(response.text)
+                return []
                 
         except Exception as e:
-            logger.error(f"❌ GROBID API error: {str(e)}")
-            return None
+            logger.debug(f"PubMed fetch error: {str(e)}")
+            return []
     
-    def _parse_grobid_xml_response(self, xml_content: str) -> Dict[str, Any]:
-        """Parse GROBID XML response and extract references"""
-        try:
-            import xml.etree.ElementTree as ET
-            
-            root = ET.fromstring(xml_content)
-            
-            # Extract document metadata
-            doc_metadata = self._extract_document_metadata(root)
-            
-            # Extract references
-            references = self._extract_references_from_xml(root)
-            
-            return {
-                "success": True,
-                "document_metadata": doc_metadata,
-                "references": references,
-                "reference_count": len(references)
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ GROBID XML parsing error: {str(e)}")
-            return {"success": False, "error": str(e)}
-    
-    def _extract_document_metadata(self, root) -> Dict[str, Any]:
-        """Extract document metadata from GROBID XML"""
-        metadata = {}
-        
-        # Extract title
-        title_elem = root.find('.//titleStmt/title')
-        if title_elem is not None:
-            metadata["title"] = title_elem.text
-        
-        # Extract authors
-        authors = []
-        for author in root.findall('.//titleStmt/author'):
-            pers_name = author.find('persName')
-            if pers_name is not None:
-                surname = pers_name.find('surname')
-                forename = pers_name.find('forename')
-                if surname is not None and forename is not None:
-                    authors.append({
-                        "family_name": surname.text,
-                        "given_name": forename.text
-                    })
-        metadata["authors"] = authors
-        
-        # Extract abstract
-        abstract_elem = root.find('.//abstract')
-        if abstract_elem is not None:
-            metadata["abstract"] = abstract_elem.text
-        
-        return metadata
-    
-    def _extract_references_from_xml(self, root) -> List[Dict[str, Any]]:
-        """Extract references from GROBID XML"""
+    def _parse_pubmed_xml(self, xml_content: str) -> List[ReferenceData]:
+        """Parse PubMed XML response"""
+        import xml.etree.ElementTree as ET
         references = []
         
-        # Debug: Log the XML structure to understand what GROBID returns
-        logger.info(f"🔬 GROBID XML structure analysis:")
-        
-        # Check for different possible reference structures
-        list_bibl = root.findall('.//listBibl')
-        logger.info(f"🔬 Found {len(list_bibl)} listBibl elements")
-        
-        bibl_struct = root.findall('.//biblStruct')
-        logger.info(f"🔬 Found {len(bibl_struct)} biblStruct elements")
-        
-        # Also check for other possible reference structures
-        ref_elements = root.findall('.//ref')
-        logger.info(f"🔬 Found {len(ref_elements)} ref elements")
-        
-        # Check for references in different namespaces
-        all_refs = root.findall('.//{http://www.tei-c.org/ns/1.0}listBibl/{http://www.tei-c.org/ns/1.0}biblStruct')
-        logger.info(f"🔬 Found {len(all_refs)} namespaced biblStruct elements")
-        
-        # Try both namespaced and non-namespaced references
-        for ref_elem in root.findall('.//listBibl/biblStruct'):
-            ref_data = self._parse_single_reference(ref_elem)
-            if ref_data:
-                references.append(ref_data)
-        
-        # Also try namespaced references
-        for ref_elem in root.findall('.//{http://www.tei-c.org/ns/1.0}listBibl/{http://www.tei-c.org/ns/1.0}biblStruct'):
-            ref_data = self._parse_single_reference(ref_elem)
-            if ref_data:
-                references.append(ref_data)
-        
-        logger.info(f"🔬 GROBID extracted {len(references)} references")
-        return references
-    
-    def _parse_single_reference(self, ref_elem) -> Optional[Dict[str, Any]]:
-        """Parse a single reference from GROBID XML"""
         try:
-            ref_data = {
-                "family_names": [],
-                "given_names": [],
-                "year": None,
-                "title": None,
-                "journal": None,
-                "doi": None,
-                "pages": None,
-                "publisher": None,
-                "url": None
-            }
+            root = ET.fromstring(xml_content)
             
-            # Extract authors (try both namespaced and non-namespaced)
-            for author in ref_elem.findall('.//author/persName') + ref_elem.findall('.//{http://www.tei-c.org/ns/1.0}author/{http://www.tei-c.org/ns/1.0}persName'):
-                surname = author.find('surname') or author.find('{http://www.tei-c.org/ns/1.0}surname')
-                forename = author.find('forename') or author.find('{http://www.tei-c.org/ns/1.0}forename')
-                if surname is not None:
-                    ref_data["family_names"].append(surname.text or "")
-                if forename is not None:
-                    ref_data["given_names"].append(forename.text or "")
-            
-            # Extract title (try both namespaced and non-namespaced)
-            title_elem = (ref_elem.find('.//title[@level="a"]') or 
-                         ref_elem.find('.//{http://www.tei-c.org/ns/1.0}title[@level="a"]'))
-            if title_elem is not None:
-                ref_data["title"] = title_elem.text
-            
-            # Extract journal (try both namespaced and non-namespaced)
-            journal_elem = (ref_elem.find('.//title[@level="j"]') or 
-                           ref_elem.find('.//{http://www.tei-c.org/ns/1.0}title[@level="j"]'))
-            if journal_elem is not None:
-                ref_data["journal"] = journal_elem.text
-            
-            # Extract year (try both namespaced and non-namespaced)
-            date_elem = (ref_elem.find('.//date') or 
-                        ref_elem.find('.//{http://www.tei-c.org/ns/1.0}date'))
-            if date_elem is not None:
-                ref_data["year"] = date_elem.get('when', date_elem.text)
-            
-            # Extract pages (try both namespaced and non-namespaced)
-            pages_elem = (ref_elem.find('.//biblScope[@unit="page"]') or 
-                         ref_elem.find('.//{http://www.tei-c.org/ns/1.0}biblScope[@unit="page"]'))
-            if pages_elem is not None:
-                ref_data["pages"] = pages_elem.text
-            
-            # Extract DOI (try both namespaced and non-namespaced)
-            doi_elem = (ref_elem.find('.//idno[@type="DOI"]') or 
-                       ref_elem.find('.//{http://www.tei-c.org/ns/1.0}idno[@type="DOI"]'))
-            if doi_elem is not None:
-                ref_data["doi"] = doi_elem.text
-            
-            # Extract publisher (try both namespaced and non-namespaced)
-            publisher_elem = (ref_elem.find('.//publisher') or 
-                             ref_elem.find('.//{http://www.tei-c.org/ns/1.0}publisher'))
-            if publisher_elem is not None:
-                ref_data["publisher"] = publisher_elem.text
-            
-            return ref_data
+            for article in root.findall('.//PubmedArticle'):
+                try:
+                    # Extract authors
+                    authors = []
+                    author_list = article.find('.//AuthorList')
+                    if author_list is not None:
+                        for author in author_list.findall('Author'):
+                            last_name = author.find('LastName')
+                            fore_name = author.find('ForeName')
+                            if last_name is not None:
+                                authors.append(Author(
+                                    surname=last_name.text,
+                                    first_name=fore_name.text if fore_name is not None else None,
+                                    full_name=f"{fore_name.text if fore_name is not None else ''} {last_name.text}".strip()
+                                ))
+                    
+                    # Extract title
+                    title_elem = article.find('.//ArticleTitle')
+                    title = title_elem.text if title_elem is not None else None
+                    
+                    # Extract journal
+                    journal_elem = article.find('.//Journal/Title')
+                    journal = journal_elem.text if journal_elem is not None else None
+                    
+                    # Extract year
+                    year_elem = article.find('.//PubDate/Year')
+                    year = int(year_elem.text) if year_elem is not None and year_elem.text else None
+                    
+                    # Extract DOI
+                    doi = None
+                    for article_id in article.findall('.//ArticleId'):
+                        if article_id.get('IdType') == 'doi':
+                            doi = article_id.text
+                            break
+                    
+                    # Extract abstract
+                    abstract_elem = article.find('.//Abstract/AbstractText')
+                    abstract = abstract_elem.text if abstract_elem is not None else None
+                    
+                    # Extract pages
+                    pages_elem = article.find('.//MedlinePgn')
+                    pages = pages_elem.text if pages_elem is not None else None
+                    
+                    # Extract volume
+                    volume_elem = article.find('.//Volume')
+                    volume = volume_elem.text if volume_elem is not None else None
+                    
+                    reference = ReferenceData(
+                        title=title,
+                        authors=authors,
+                        year=year,
+                        journal=journal,
+                        doi=doi,
+                        abstract=abstract,
+                        pages=pages,
+                        volume=volume,
+                        publication_type="journal-article"
+                    )
+                    references.append(reference)
+                    
+                except Exception as e:
+                    logger.debug(f"Error parsing PubMed article: {str(e)}")
+                    continue
             
         except Exception as e:
-            logger.error(f"❌ Error parsing single reference: {str(e)}")
-            return None
+            logger.debug(f"Error parsing PubMed XML: {str(e)}")
+        
+        return references
+
+
+# GROBID Client removed - using LLM for primary parsing

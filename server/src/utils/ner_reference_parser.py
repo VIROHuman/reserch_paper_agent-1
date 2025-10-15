@@ -10,10 +10,7 @@ import re
 from loguru import logger
 
 # Import the NER parser from the services directory
-import sys
-import os
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'services'))
-from reference_parcer_ollama import AdvancedNERParser, Author, ReferenceData
+from ..services.reference_parcer_ollama import AdvancedNERParser, Author, ReferenceData
 
 
 class NERReferenceParser:
@@ -23,7 +20,7 @@ class NERReferenceParser:
     """
     
     def __init__(self, 
-                 confidence_threshold: float = 0.5,
+                 confidence_threshold: float = 0.3,  # Lowered from 0.5 to catch more authors
                  enable_entity_disambiguation: bool = True,
                  enable_confidence_weighting: bool = True):
         

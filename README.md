@@ -54,122 +54,138 @@ A comprehensive full-stack application for extracting and parsing research paper
 └── README.md
 ```
 
+## 🚀 Quick Start
+
+**New to this project?** See [QUICK_START.md](QUICK_START.md) for a 5-minute setup guide!
+
+**Need detailed instructions?** See [SETUP_GUIDE.md](SETUP_GUIDE.md) for comprehensive setup documentation.
+
 ## Installation
 
-### Option 1: Docker Setup (Recommended)
+### Prerequisites
+- **Python 3.8+** (Recommended: Python 3.10 or 3.11)
+- **Node.js 18+** (for the frontend)
+- **pip** and **npm** (package managers)
 
-The easiest way to get started is with Docker, which includes Grobid for enhanced PDF processing:
+### Option 1: Automated Setup (Recommended)
 
-#### Prerequisites
-- Docker Desktop installed and running
-- At least 4GB of available RAM
+#### Step 1: Install Dependencies
 
-#### Quick Start with Docker
+**Windows:**
 ```bash
-# Windows
-setup_docker.bat
-
-# Linux/Mac
-./setup_docker.sh
+setup_dependencies.bat
 ```
 
-#### Manual Docker Setup
+**Linux/Mac:**
 ```bash
-# Start all services (Frontend, Backend, Grobid)
-docker-compose up --build -d
-
-# View logs
-docker-compose logs -f
-
-# Stop services
-docker-compose down
+chmod +x setup_dependencies.sh
+./setup_dependencies.sh
 ```
 
-#### Development with Docker
+Or run the Python script directly:
 ```bash
-# Start development environment with hot reloading
-docker-compose -f docker-compose.dev.yml up --build -d
+python setup_dependencies.py
 ```
 
-**Access Points:**
-- Frontend: http://localhost:3000
-- Backend API: http://localhost:8000
-- API Documentation: http://localhost:8000/docs
-- Grobid Service: http://localhost:8070
+This will:
+- ✅ Install all Python dependencies from requirements.txt
+- ✅ Download SpaCy language model (en_core_web_sm)
+- ✅ Verify installations
+- ✅ Create necessary directories
 
-For detailed Docker setup instructions, see [DOCKER_SETUP.md](DOCKER_SETUP.md).
+#### Step 2: Install Frontend Dependencies
 
-### Option 2: Local Setup
-
-#### Prerequisites
-- Python 3.8+ (for backend)
-- Node.js 18+ (for frontend)
-- Ollama (optional, for AI-powered parsing)
-
-#### Quick Start
-
-1. **Clone the repository**:
 ```bash
-git clone <repository-url>
-cd reserch_paper_agent-1
+cd frontend
+npm install
+cd ..
 ```
 
-2. **Run the setup script**:
+#### Step 3: Run the Application
+
+**Windows:**
 ```bash
-# Windows
 setup_fullstack.bat
+```
 
-# Linux/Mac
+**Linux/Mac:**
+```bash
 chmod +x setup_fullstack.sh
 ./setup_fullstack.sh
 ```
 
-3. **Manual setup** (if scripts don't work):
-```bash
-# Backend setup
-pip install -r requirements.txt
-python run_server.py
+#### Step 4: Access the Application
+- **Frontend:** http://localhost:3000
+- **Backend API:** http://localhost:8000
+- **API Documentation:** http://localhost:8000/docs
 
-# Frontend setup (in new terminal)
-cd frontend
-npm install
-npm run dev
-```
+### Option 2: Manual Setup
 
-4. **Access the application**:
-- Frontend: http://localhost:3000
-- Backend API: http://localhost:8000
-- API Documentation: http://localhost:8000/docs
-
-### Detailed Setup
+If the automated scripts don't work, follow these manual steps:
 
 1. **Install Python dependencies**:
 ```bash
 pip install -r requirements.txt
+python -m spacy download en_core_web_sm
 ```
 
-2. **Install GROBID (optional, for enhanced PDF processing)**:
+2. **Install Frontend dependencies**:
 ```bash
-# Follow the setup guide in setup_local_grobid.md
+cd frontend
+npm install
+cd ..
 ```
 
-3. **Install Ollama (optional, for AI-powered parsing)**:
+3. **Start the Backend** (Terminal 1):
 ```bash
-# Install Ollama
-curl -fsSL https://ollama.ai/install.sh | sh
-
-# Pull a model (e.g., Gemma)
-ollama pull gemma3:1b
+python run_server.py
 ```
 
-4. **Configure environment variables** (optional):
-Create a `.env` file in the project root:
+4. **Start the Frontend** (Terminal 2):
+```bash
+cd frontend
+npm run dev
+```
+
+5. **Access the application**:
+- Frontend: http://localhost:3000
+- Backend API: http://localhost:8000
+- API Documentation: http://localhost:8000/docs
+
+### Option 3: Docker Setup
+
+If you prefer Docker (includes all dependencies):
+
+```bash
+# Build and start all services
+docker-compose up --build
+
+# Access the application
+# Frontend: http://localhost:3000
+# Backend: http://localhost:8000
+```
+
+### Optional: Install Ollama (for LLM features)
+
+1. Download Ollama from: https://ollama.ai/
+2. Install and start: `ollama serve`
+3. Pull the model: `ollama pull phi:latest`
+
+### Environment Variables (Optional)
+
+Create a `.env` file in the project root for custom configuration:
+
 ```env
-# Application Settings
-DEBUG=True
-LOG_LEVEL=INFO
+# API Keys (Optional - for enhanced features)
+OPENAI_API_KEY=your_key_here
+CROSSREF_API_KEY=your_key_here
+SEMANTIC_SCHOLAR_API_KEY=your_key_here
+
+# Server Configuration
 HOST=0.0.0.0
 PORT=8000
+LOG_LEVEL=INFO
+DEBUG=True
 ```
 
 ## Usage

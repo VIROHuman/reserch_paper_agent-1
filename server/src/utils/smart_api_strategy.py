@@ -7,7 +7,7 @@ from loguru import logger
 from dataclasses import dataclass
 from enum import Enum
 
-from .api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient
+from .api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient, PubMedClient, circuit_breaker
 from .text_normalizer import text_normalizer
 
 
@@ -16,6 +16,7 @@ class APIProvider(Enum):
     OPENALEX = "openalex"
     SEMANTIC_SCHOLAR = "semantic_scholar"
     DOAJ = "doaj"
+    PUBMED = "pubmed"
 
 
 @dataclass
@@ -46,6 +47,7 @@ class SmartAPIStrategy:
         self.openalex_client = OpenAlexClient()
         self.semantic_client = SemanticScholarClient()
         self.doaj_client = DOAJClient()
+        self.pubmed_client = PubMedClient()
         
         # No domain filtering - support all research domains
         self.domain_whitelist = None  # Disabled
@@ -54,6 +56,7 @@ class SmartAPIStrategy:
         self.api_priority = [
             APIProvider.CROSSREF,
             APIProvider.OPENALEX,
+            APIProvider.PUBMED,
             APIProvider.SEMANTIC_SCHOLAR,
             APIProvider.DOAJ
         ]
@@ -97,43 +100,32 @@ class SmartAPIStrategy:
             enriched_ref["author_analysis"] = author_analysis
             return enriched_ref
         
-        timeout_occurred = False
         current_quality = initial_quality  # Initialize current_quality
         
-        # Adjust max API calls for aggressive search
-        max_calls = self.max_api_calls * 2 if aggressive_search else self.max_api_calls
-        logger.info(f"🔍 Using {max_calls} API calls for enrichment")
+        # Smart filtering: decide which APIs to call based on existing data
+        apis_to_call = self._select_apis_smart(parsed_ref, aggressive_search)
+        logger.info(f"🎯 Selected {len(apis_to_call)} APIs to call: {[api.value for api in apis_to_call]}")
         
-        for i, provider in enumerate(self.api_priority):
-            if len(api_results) >= max_calls:
-                break
-            
-            # Add delay between API calls to prevent rate limiting
-            if i > 0:
-                await asyncio.sleep(0.5)
-            
-            try:
-                result = await self._call_api_with_timeout(provider, search_query, parsed_ref)
-                if result:
-                    # Check if this result came after a timeout - if so, don't merge
-                    if timeout_occurred:
-                        logger.warning(f"⚠️ Skipping merge from {provider.value} due to previous timeout")
-                        continue
-                    
-                    api_results.append(result)
-                    enrichment_sources.append(provider.value)
-                    
-                    # Don't merge immediately - collect all results for adjudication
-                    
-                else:
-                    # Check if this was a timeout (result is None but no exception)
-                    timeout_occurred = True
-                    logger.warning(f"⚠️ Timeout detected for {provider.value} - no more merges this cycle")
-                    
-                    
-            except Exception as e:
-                logger.warning(f"{provider.value} API error: {e}")
+        # Parallel API calls for faster enrichment
+        logger.info("🚀 Calling APIs in parallel...")
+        api_tasks = [
+            self._call_api_without_timeout(provider, search_query, parsed_ref)
+            for provider in apis_to_call
+        ]
+        
+        # Wait for all APIs to complete (no timeout)
+        results = await asyncio.gather(*api_tasks, return_exceptions=True)
+        
+        # Process results
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.warning(f"{apis_to_call[i].value} API error: {result}")
                 continue
+            
+            if result:
+                api_results.append(result)
+                enrichment_sources.append(result.provider.value)
+                logger.info(f"✅ {result.provider.value}: Found match (confidence: {result.confidence:.2f})")
         
         # Apply multi-source adjudication if we have multiple results
         if len(api_results) > 1:
@@ -652,48 +644,99 @@ class SmartAPIStrategy:
         
         return analysis
     
-    async def _call_api_with_timeout(self, provider: APIProvider, query: str, parsed_ref: Dict[str, Any]) -> Optional[APIResult]:
-        """Call API with timeout, retry logic, and rate limiting"""
+    def _select_apis_smart(self, parsed_ref: Dict[str, Any], aggressive_search: bool) -> List[APIProvider]:
+        """Smart API selection based on existing data and needs"""
+        selected_apis = []
+        
+        has_doi = bool(parsed_ref.get("doi"))
+        has_title = bool(parsed_ref.get("title") and len(parsed_ref.get("title", "")) > 10)
+        has_authors = bool(parsed_ref.get("family_names") and len(parsed_ref.get("family_names", [])) > 0)
+        has_year = bool(parsed_ref.get("year"))
+        has_journal = bool(parsed_ref.get("journal") and len(parsed_ref.get("journal", "")) > 5)
+        
+        # If we have DOI, prioritize DOI-based APIs
+        if has_doi:
+            logger.info("📌 Has DOI - prioritizing CrossRef and OpenAlex")
+            selected_apis.extend([APIProvider.CROSSREF, APIProvider.OPENALEX])
+        
+        # If we have good title + authors, use all APIs
+        elif has_title and has_authors:
+            logger.info("📚 Has title + authors - using all APIs")
+            if aggressive_search:
+                # Use all APIs for aggressive search
+                selected_apis = self.api_priority.copy()
+            else:
+                # Use top 3 APIs
+                selected_apis = self.api_priority[:3]
+        
+        # If we have title only, use title-friendly APIs
+        elif has_title:
+            logger.info("📖 Has title only - using title-search APIs")
+            selected_apis.extend([
+                APIProvider.CROSSREF,
+                APIProvider.SEMANTIC_SCHOLAR,
+                APIProvider.OPENALEX
+            ])
+        
+        # If we have authors + year, use author-friendly APIs
+        elif has_authors and has_year:
+            logger.info("👥 Has authors + year - using author-search APIs")
+            selected_apis.extend([
+                APIProvider.CROSSREF,
+                APIProvider.OPENALEX,
+                APIProvider.PUBMED
+            ])
+        
+        # Fallback: use top 2 APIs
+        else:
+            logger.info("⚠️ Limited data - using top 2 APIs only")
+            selected_apis = self.api_priority[:2]
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_apis = []
+        for api in selected_apis:
+            if api not in seen:
+                seen.add(api)
+                unique_apis.append(api)
+        
+        return unique_apis
+    
+    async def _call_api_without_timeout(self, provider: APIProvider, query: str, parsed_ref: Dict[str, Any]) -> Optional[APIResult]:
+        """Call API without timeout - let circuit breaker handle failures"""
         start_time = asyncio.get_event_loop().time()
-        results = None  # Initialize results to avoid UnboundLocalError
+        results = None
         
         try:
             # Add small delay for Semantic Scholar to prevent rate limiting
             if provider == APIProvider.SEMANTIC_SCHOLAR:
                 await asyncio.sleep(1.0)
             
-            # Call the appropriate API with original timeouts
+            # Call the appropriate API WITHOUT timeout
             if provider == APIProvider.CROSSREF:
-                results = await asyncio.wait_for(
-                    self.crossref_client.search_reference(query, limit=2),
-                    timeout=15.0
-                )
+                results = await self.crossref_client.search_reference(query, limit=3)
             elif provider == APIProvider.OPENALEX:
-                results = await asyncio.wait_for(
-                    self.openalex_client.search_reference(query, limit=2),
-                    timeout=15.0
-                )
+                results = await self.openalex_client.search_reference(query, limit=3)
             elif provider == APIProvider.SEMANTIC_SCHOLAR:
-                results = await asyncio.wait_for(
-                    self.semantic_client.search_reference(query, limit=2),
-                    timeout=15.0
-                )
+                results = await self.semantic_client.search_reference(query, limit=3)
+            elif provider == APIProvider.PUBMED:
+                results = await self.pubmed_client.search_reference(query, limit=3)
             elif provider == APIProvider.DOAJ:
-                results = await asyncio.wait_for(
-                    self.doaj_client.search_reference(query, limit=2),
-                    timeout=15.0
-                )
+                results = await self.doaj_client.search_reference(query, limit=3)
             else:
                 return None
             
             response_time = asyncio.get_event_loop().time() - start_time
+            logger.info(f"⏱️ {provider.value}: Response time {response_time:.2f}s")
             
             if not results:
+                logger.debug(f"{provider.value}: No results found")
                 return None
             
             # Find best match and assess quality
             best_match = self._find_best_match_smart(parsed_ref, results)
             if not best_match:
+                logger.debug(f"{provider.value}: No good match found")
                 return None
             
             # Convert to our format
@@ -702,6 +745,8 @@ class SmartAPIStrategy:
             # Calculate quality metrics
             quality_score = self._calculate_match_quality(parsed_ref, converted_data)
             confidence = self._calculate_confidence(converted_data)
+            
+            logger.info(f"✓ {provider.value}: Match found (quality: {quality_score:.2f}, confidence: {confidence:.2f})")
             
             return APIResult(
                 provider=provider,
@@ -712,15 +757,12 @@ class SmartAPIStrategy:
                 response_time=response_time
             )
             
-        except asyncio.TimeoutError:
-            logger.warning(f"⏰ {provider.value}: Timeout after 15s")
-            return None
         except Exception as e:
             error_msg = str(e)
             if "429" in error_msg or "rate limit" in error_msg.lower():
                 logger.warning(f"🚫 {provider.value}: Rate limited - {error_msg}")
             else:
-                logger.warning(f"❌ {provider.value}: Error - {error_msg}")
+                logger.debug(f"{provider.value}: Error - {error_msg}")
             return None
     
     def _find_best_match_smart(self, parsed_ref: Dict[str, Any], api_results: List[Any]) -> Optional[Any]:

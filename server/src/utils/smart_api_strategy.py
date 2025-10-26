@@ -833,6 +833,7 @@ class SmartAPIStrategy:
                 continue
             
             candidates_checked += 1
+            logger.debug(f"Checking candidate {candidates_checked}: title='{result.title[:60]}...'")
             
             # Normalize titles for better comparison
             parsed_title_norm = text_normalizer.normalize_title(parsed_ref.get("title", ""))
@@ -843,12 +844,14 @@ class SmartAPIStrategy:
                 parsed_title_norm, 
                 result_title_norm
             )
+            logger.debug(f"  Title similarity: {title_sim:.2f}")
             
             # Check if we have authors - if not, relax requirements
             has_authors = bool(parsed_ref.get("family_names"))
             
-            # Require title similarity ≥ 0.50 (more relaxed to catch more matches)
-            if title_sim < 0.50:
+            # Require title similarity ≥ 0.30 (much more relaxed to catch more matches)
+            if title_sim < 0.30:
+                logger.debug(f"  ❌ Rejected: title similarity {title_sim:.2f} < 0.30")
                 continue
             
             # Check year agreement within ±2 (more flexible)
@@ -864,12 +867,11 @@ class SmartAPIStrategy:
                 # If no year in parsed_ref, don't require year match
                 year_match = True
             
-            # Only check author match if authors exist
+            # Only check author match if authors exist - make it optional
             author_match_score = 0.0
             if has_authors:
                 author_match_score = self._calculate_author_match_score(parsed_ref, result)
-                if author_match_score < 0.5:  # Require at least 50% author overlap
-                    continue
+                # Don't reject based on author match - just use score
             else:
                 # No authors in original - don't require author match
                 author_match_score = 1.0
@@ -884,11 +886,11 @@ class SmartAPIStrategy:
             author_match_threshold = 0.6 if has_authors else 0.0
             composite_score = self._calculate_composite_score(title_sim, year_match, author_match_score > author_match_threshold, result)
             
-            # Only consider matches with score ≥ 0.50 (more relaxed to catch more matches)
-            min_score = 0.50
-            if composite_score >= min_score and composite_score > best_score:
+            # Accept any match with score > 0 (no minimum threshold)
+            if composite_score > best_score:
                 best_score = composite_score
                 best_match = result
+                logger.info(f"✅ Found valid match with score {composite_score:.2f} (title_sim={title_sim:.2f}, year_match={year_match}, author_match={author_match_score > author_match_threshold})")
         
         logger.info(f"Checked {candidates_checked} candidates, best match score: {best_score:.2f}")
         return best_match
@@ -1216,22 +1218,50 @@ class SmartAPIStrategy:
         # Calculate match score for merge decisions
         match_score = self._calculate_merge_score(original, api_result)
         
-        # Enhanced logic for filling missing fields
+        # Enhanced logic for filling missing fields AND correcting wrong data
         if fill_missing_fields:
-            logger.info(f"🔍 Fill missing fields mode - will fill any missing data")
-            # Fill all missing fields regardless of match score
-            for field in ["title", "year", "journal", "doi", "pages", "publisher", "url", "abstract", "volume", "issue"]:
-                if not merged.get(field) and api_result.data.get(field):
-                    merged[field] = api_result.data[field]
-                    merged_fields.append(field)
-                    logger.info(f"✅ Filled missing {field}: '{api_result.data[field]}'")
+            logger.info(f"🔍 Fill missing fields mode - will fill missing data and correct wrong data")
             
-            # Handle authors specially
-            if not merged.get("family_names") and api_result.data.get("family_names"):
-                merged["family_names"] = api_result.data["family_names"]
-                merged["given_names"] = api_result.data.get("given_names", [])
-                merged_fields.append("authors")
-                logger.info(f"✅ Filled missing authors: {api_result.data['family_names']}")
+            # For each field, check if we should update
+            for field in ["title", "year", "journal", "doi", "pages", "publisher", "url", "abstract", "volume", "issue"]:
+                original_value = merged.get(field)
+                api_value = api_result.data.get(field)
+                
+                if api_value:
+                    if not original_value:
+                        # Fill missing field
+                        merged[field] = api_value
+                        merged_fields.append(field)
+                        logger.info(f"✅ Filled missing {field}: '{api_value}'")
+                    elif original_value != api_value:
+                        # Field exists but differs - check if API value is better
+                        if self._is_better_value(original_value, api_value, field):
+                            merged[field] = api_value
+                            merged_fields.append(field)
+                            logger.info(f"✨ Corrected {field}: '{original_value}' → '{api_value}'")
+                        # Always update if original looks incomplete/wrong
+                        elif len(str(api_value)) > len(str(original_value)) * 1.2:
+                            merged[field] = api_value
+                            merged_fields.append(field)
+                            logger.info(f"✨ Updated {field}: '{original_value}' → '{api_value}'")
+            
+            # Handle authors specially - always update if API has more/better authors
+            api_family_names = api_result.data.get("family_names", [])
+            api_given_names = api_result.data.get("given_names", [])
+            
+            if api_family_names:
+                original_family = merged.get("family_names", [])
+                
+                if not original_family:
+                    merged["family_names"] = api_family_names
+                    merged["given_names"] = api_given_names
+                    merged_fields.append("authors")
+                    logger.info(f"✅ Added missing authors: {api_family_names}")
+                elif len(api_family_names) > len(original_family):
+                    merged["family_names"] = api_family_names
+                    merged["given_names"] = api_given_names
+                    merged_fields.append("authors")
+                    logger.info(f"✨ Corrected authors: {len(original_family)} → {len(api_family_names)} authors")
             
             return merged
         
@@ -1251,8 +1281,8 @@ class SmartAPIStrategy:
                     logger.info(f"Added {field}: '{api_result.data[field]}'")
         
         elif match_score >= 0.80:
-            # Aggressive merge: allow replacing critical fields
-            logger.info(f"Aggressive merge (score {match_score:.2f}): full merge allowed")
+            # Aggressive merge: allow replacing and correcting all fields
+            logger.info(f"Aggressive merge (score {match_score:.2f}): full merge and correction allowed")
             for field in ["title", "year", "journal", "doi", "pages", "publisher", "url", "abstract", "volume", "issue"]:
                 original_value = merged.get(field)
                 api_value = api_result.data.get(field)
@@ -1263,16 +1293,22 @@ class SmartAPIStrategy:
                         merged[field] = api_value
                         merged_fields.append(field)
                         logger.info(f"Filled missing {field}: '{api_value}'")
-                    elif field in ["title", "journal", "authors"] and self._can_overwrite_critical_field(original, api_result):
-                        # Only overwrite critical fields if both sources agree
-                        merged[field] = api_value
-                        merged_fields.append(field)
-                        logger.info(f"Overwrote {field}: '{original_value}' → '{api_value}'")
-                    elif field not in ["title", "journal", "authors"]:
-                        # Safe to overwrite non-critical fields
-                        merged[field] = api_value
-                        merged_fields.append(field)
-                        logger.info(f"Updated {field}: '{original_value}' → '{api_value}'")
+                    elif original_value != api_value:
+                        # Field exists but different - update if API value is better or more complete
+                        if self._is_better_value(original_value, api_value, field):
+                            merged[field] = api_value
+                            merged_fields.append(field)
+                            logger.info(f"Corrected {field}: '{original_value}' → '{api_value}'")
+                        elif len(str(api_value)) > len(str(original_value)) * 1.2:
+                            # API value is significantly more complete
+                            merged[field] = api_value
+                            merged_fields.append(field)
+                            logger.info(f"Improved {field}: '{original_value}' → '{api_value}'")
+                        elif field not in ["title"]:  # Don't change title unless significantly better
+                            # For most fields, prefer more complete API data
+                            merged[field] = api_value
+                            merged_fields.append(field)
+                            logger.info(f"Updated {field}: '{original_value}' → '{api_value}'")
                     else:
                         logger.info(f"Kept original {field}: '{original_value}'")
         

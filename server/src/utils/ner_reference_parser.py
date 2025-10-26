@@ -22,9 +22,10 @@ class NERReferenceParser:
     def __init__(self, 
                  confidence_threshold: float = 0.3,  # Lowered from 0.5 to catch more authors
                  enable_entity_disambiguation: bool = True,
-                 enable_confidence_weighting: bool = True):
+                 enable_confidence_weighting: bool = True,
+                 use_llm_primary: bool = False):  # Disable LLM - use NER only for stability
         
-        logger.info("Initializing NER Reference Parser as main stream parser")
+        logger.info("Initializing NER Reference Parser as main stream parser (LLM disabled)")
         
         self.confidence_threshold = confidence_threshold
         self.enable_disambiguation = enable_entity_disambiguation
@@ -35,10 +36,11 @@ class NERReferenceParser:
             self.ner_parser = AdvancedNERParser(
                 confidence_threshold=confidence_threshold,
                 enable_entity_disambiguation=enable_entity_disambiguation,
-                enable_confidence_weighting=enable_confidence_weighting
+                enable_confidence_weighting=enable_confidence_weighting,
+                use_llm_primary=False  # Disable LLM for stability
             )
             self.ner_available = True
-            logger.info("✅ NER Reference Parser initialized successfully with transformer model")
+            logger.info("✅ NER Reference Parser initialized successfully (LLM disabled)")
         except Exception as e:
             logger.warning(f"⚠️ NER model initialization failed: {str(e)}")
             logger.info("🔄 Falling back to regex-based parsing")
@@ -56,8 +58,14 @@ class NERReferenceParser:
             if self.ner_available and self.ner_parser:
                 # Use the NER parser to get structured data
                 ner_result = self.ner_parser.parse_reference_to_dict(raw_citation)
-                result = self._convert_ner_to_api_format(ner_result, raw_citation)
-                logger.debug(f"NER parsing completed with quality score: {result.get('quality_score', 0):.2f}")
+                
+                # Safety check: ensure ner_result is a valid dict
+                if not ner_result or not isinstance(ner_result, dict):
+                    logger.warning(f"NER parser returned invalid result: {ner_result}, using regex fallback")
+                    result = self._regex_based_parsing(raw_citation)
+                else:
+                    result = self._convert_ner_to_api_format(ner_result, raw_citation)
+                    logger.debug(f"NER parsing completed with quality score: {result.get('quality_score', 0):.2f}")
             else:
                 # Use regex-based fallback parsing
                 result = self._regex_based_parsing(raw_citation)
@@ -110,6 +118,12 @@ class NERReferenceParser:
             elif isinstance(author, str):
                 # Fallback for string authors
                 family_names.append(author)
+            elif hasattr(author, 'surname'):
+                # Handle Pydantic Author objects
+                if author.surname:
+                    family_names.append(author.surname)
+                if author.first_name:
+                    given_names.append(author.first_name)
         
         # Calculate quality metrics
         confidence_scores = ner_result.get('confidence_scores', {})
@@ -222,6 +236,84 @@ class NERReferenceParser:
         
         return " | ".join(parts) if parts else "No structured data extracted"
     
+    def _regex_based_parsing(self, raw_citation: str) -> dict:
+        """
+        Simple regex-based fallback parsing when NER is not available
+        """
+        import re
+        
+        result = {
+            'family_names': [],
+            'given_names': [],
+            'year': None,
+            'title': None,
+            'journal': None,
+            'volume': None,
+            'issue': None,
+            'pages': None,
+            'doi': None,
+            'url': None,
+            'publisher': None,
+            'abstract': None,
+            'publication_type': None,
+            'raw_text': raw_citation,
+            'parser_used': 'REGEX_FALLBACK',
+            'api_enrichment_used': False,
+            'enrichment_sources': [],
+            'quality_score': 0.3,
+            'confidence_scores': {'overall': 0.3}
+        }
+        
+        # Extract year
+        year_match = re.search(r'\b(19|20)\d{2}\b', raw_citation)
+        if year_match:
+            result['year'] = int(year_match.group())
+            result['confidence_scores']['year'] = 0.8
+        
+        # Extract DOI
+        doi_match = re.search(r'10\.\d+/[^\s]+', raw_citation)
+        if doi_match:
+            result['doi'] = doi_match.group()
+            result['confidence_scores']['doi'] = 0.9
+        
+        # Extract URL
+        url_match = re.search(r'https?://[^\s]+', raw_citation)
+        if url_match:
+            result['url'] = url_match.group()
+            result['confidence_scores']['url'] = 0.9
+        
+        # Simple author extraction (first few capitalized words)
+        author_pattern = r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)'
+        authors = re.findall(author_pattern, raw_citation)
+        if authors:
+            for author in authors[:5]:  # Limit to 5 authors
+                if len(author.split()) >= 2:  # At least first and last name
+                    name_parts = author.split()
+                    result['family_names'].append(name_parts[-1])  # Last name
+                    result['given_names'].append(name_parts[0])    # First name
+        
+        # Simple title extraction (text between authors and year)
+        if result['year']:
+            year_pos = raw_citation.find(str(result['year']))
+            if year_pos > 0:
+                # Look for title before year
+                before_year = raw_citation[:year_pos].strip()
+                # Find the last comma or period before year
+                for sep in [',', '.']:
+                    sep_pos = before_year.rfind(sep)
+                    if sep_pos > 10:  # Reasonable title length
+                        title = before_year[sep_pos+1:].strip()
+                        if len(title) > 10:
+                            result['title'] = title
+                            break
+        
+        # Calculate overall confidence
+        confidences = [v for k, v in result['confidence_scores'].items() if k != 'overall']
+        if confidences:
+            result['confidence_scores']['overall'] = float(sum(confidences) / len(confidences))
+        
+        return result
+
     def _create_fallback_result(self, raw_citation: str, error: str, index: int = 0) -> dict:
         """
         Create a fallback result when NER parsing fails

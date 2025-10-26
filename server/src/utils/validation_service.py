@@ -8,7 +8,7 @@ import re
 import requests
 from typing import List, Dict, Any, AsyncGenerator
 from loguru import logger
-from .enrichment_cache import enrichment_cache
+# Caching removed as requested
 
 
 class ValidationService:
@@ -66,28 +66,14 @@ class ValidationService:
     async def validate_single_reference(
         self, 
         reference: Dict[str, Any], 
-        index: int,
-        use_cache: bool = True
+        index: int
     ) -> Dict[str, Any]:
         """
         Validate and enrich a single reference with rate limiting
         """
         async with self.semaphore:
             try:
-                # Check cache first
-                if use_cache:
-                    title = reference.get("original_text", "")
-                    authors = reference.get("family_names", [])
-                    
-                    cached_result = enrichment_cache.get(title, authors)
-                    if cached_result:
-                        logger.info(f"✅ Using cached enrichment for reference {index}")
-                        result = reference.copy()
-                        result.update(cached_result)
-                        result["from_cache"] = True
-                        return result
-                
-                # Parse with enrichment
+                # Parse with enrichment (no caching)
                 ref_text = reference.get("original_text", "")
                 if not ref_text:
                     return reference
@@ -137,12 +123,8 @@ class ValidationService:
                     "comparison_analysis": parsed_ref.get("conflict_analysis", {}),
                     "doi_metadata": parsed_ref.get("doi_metadata", {}),
                     "validation_changes": changes_made,  # New: track what changed
-                    "from_cache": False
+                    "from_cache": False  # Always false since caching is disabled
                 }
-                
-                # Cache the enrichment result
-                if use_cache and parsed_ref.get("api_enrichment_used"):
-                    enrichment_cache.set(ref_text, authors, result)
                 
                 return result
                 
@@ -241,7 +223,7 @@ class ValidationService:
         validated_results = references.copy()
         validated_count = 0
         enriched_count = 0
-        cached_count = 0
+        cached_count = 0  # Always 0 since caching is disabled
         
         for batch_start in range(0, total_to_validate, batch_size):
             batch_end = min(batch_start + batch_size, total_to_validate)
@@ -264,9 +246,8 @@ class ValidationService:
                 validated_results[idx] = result
                 validated_count += 1
                 
-                if result.get("from_cache"):
-                    cached_count += 1
-                elif result.get("api_enrichment_used"):
+                # Check if enrichment was used
+                if result.get("api_enrichment_used"):
                     enriched_count += 1
                 
                 # Yield individual result
@@ -281,15 +262,36 @@ class ValidationService:
                     "message": f"Validated reference {validated_count}/{total_to_validate}"
                 }
         
-        # Get cache stats
-        cache_stats = enrichment_cache.get_stats()
+        # Cache stats disabled
+        cache_stats = {"hits": 0, "misses": 0, "size": 0}
         
-        # Final complete message
+        # Final complete message - convert dict to array for frontend
+        results_array = [validated_results[i] for i in range(len(references))]
+        
+        # Sanitize results to ensure JSON serializability
+        sanitized_results = []
+        for result in results_array:
+            try:
+                # Test if it's JSON serializable
+                json.dumps(result)
+                sanitized_results.append(result)
+            except (TypeError, ValueError) as serialization_error:
+                logger.error(f"Error serializing validation result: {serialization_error}")
+                # Create a safe fallback
+                safe_result = {
+                    "index": result.get("index", 0),
+                    "original_text": str(result.get("original_text", ""))[:500],
+                    "parser_used": result.get("parser_used", "error"),
+                    "error": f"Serialization error: {str(serialization_error)}"
+                }
+                sanitized_results.append(safe_result)
+        
+        logger.info(f"✅ Sending complete event with {len(sanitized_results)} sanitized results")
         yield {
             "type": "complete",
             "progress": 100,
             "message": f"Validation complete! Enriched {enriched_count}/{total_to_validate} references",
-            "results": validated_results,
+            "results": sanitized_results,
             "summary": {
                 "total_references": len(references),
                 "validated": validated_count,

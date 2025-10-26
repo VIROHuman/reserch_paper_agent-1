@@ -15,6 +15,8 @@ class Settings:
         self.crossref_base_url = "https://api.crossref.org"
         self.openalex_base_url = "https://api.openalex.org"
         self.semantic_scholar_base_url = "https://api.semanticscholar.org/graph/v1"
+        self.arxiv_base_url = "https://export.arxiv.org/api/query"
+        self.pubmed_base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
         # GROBID removed - using LLM for parsing
         
         # API timeout and retry settings

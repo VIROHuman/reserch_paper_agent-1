@@ -600,20 +600,66 @@ class ApiClient {
 
       const decoder = new TextDecoder()
       let finalResults: ParsedReference[] = []
+      let startTime = Date.now()
+      const maxWaitTime = 300000 // 5 minutes
+      let buffer = '' // Buffer for incomplete lines
 
+      let eventsReceived = 0
       try {
         while (true) {
+          // Check for timeout
+          if (Date.now() - startTime > maxWaitTime) {
+            console.error("[DEBUG] Validation timeout after 5 minutes")
+            throw new Error("Validation timeout - no completion event received")
+          }
+          
           const { done, value } = await reader.read()
           
-          if (done) break
+          if (done) {
+            console.log(`[DEBUG] Stream ended after receiving ${eventsReceived} events`)
+            console.log(`[DEBUG] finalResults.length = ${finalResults.length}`)
+            console.log(`[DEBUG] Buffer remaining: ${buffer.length} chars`)
+            
+            // Process any remaining buffer data
+            if (buffer.trim()) {
+              if (buffer.startsWith('data: ')) {
+                try {
+                  const event: ValidationProgress = JSON.parse(buffer.slice(6))
+                  console.log(`[DEBUG] Final buffered event:`, event.type)
+                  if (onProgress) {
+                    onProgress(event)
+                  }
+                  if (event.type === 'complete' && event.results) {
+                    finalResults = event.results
+                  }
+                } catch (parseError) {
+                  console.warn("[API] Failed to parse final buffer:", parseError)
+                }
+              }
+            }
+            
+            break
+          }
 
           const chunk = decoder.decode(value, { stream: true })
-          const lines = chunk.split('\n')
+          buffer += chunk
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || '' // Keep incomplete line in buffer
 
           for (const line of lines) {
             if (line.startsWith('data: ')) {
+              const data = line.slice(6)
+              
+              // Check for end-of-stream marker
+              if (data.trim() === '[DONE]') {
+                console.log("[DEBUG] ✅ End-of-stream marker received")
+                break
+              }
+              
               try {
-                const event: ValidationProgress = JSON.parse(line.slice(6))
+                eventsReceived++
+                const event: ValidationProgress = JSON.parse(data)
+                console.log(`[DEBUG] Event #${eventsReceived}:`, event.type, event)
                 
                 // Send progress update
                 if (onProgress) {
@@ -621,23 +667,38 @@ class ApiClient {
                 }
                 
                 // Store final results
-                if (event.type === 'complete' && event.results) {
-                  finalResults = event.results
+                if (event.type === 'complete') {
+                  console.log("[DEBUG] ✅ COMPLETE EVENT RECEIVED!")
+                  console.log("[DEBUG] Event data:", event)
+                  if (event.results) {
+                    console.log("[DEBUG] Results available, length:", event.results.length)
+                    finalResults = event.results
+                  } else {
+                    console.warn("[DEBUG] Complete event but no results array")
+                  }
                 } else if (event.type === 'error') {
+                  console.error("[DEBUG] Error event received:", event.message)
                   throw new Error(event.message || 'Validation failed')
+                } else if (event.type === 'result') {
+                  console.log(`[DEBUG] Result event for ref ${event.index}`)
+                } else {
+                  console.log(`[DEBUG] ${event.type} event received`)
                 }
               } catch (parseError) {
                 console.warn("[API] Failed to parse validation event:", parseError)
+                console.warn("[API] Raw line:", line)
               }
             }
           }
         }
 
         if (finalResults.length === 0) {
+          console.error("[DEBUG] No results received from validation")
+          console.error("[DEBUG] This might be due to the completion event not being received properly")
           throw new Error("No results received from validation")
         }
 
-        console.log("[API] Validation completed successfully")
+        console.log("[API] Validation completed successfully with", finalResults.length, "results")
         return finalResults
       } finally {
         reader.releaseLock()

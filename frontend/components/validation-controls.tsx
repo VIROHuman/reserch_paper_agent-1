@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ValidationMode, ValidationProgress } from "@/lib/api"
-import { Zap, BarChart3, Microscope, CheckCircle2, Loader2, TrendingUp } from "lucide-react"
+import { Zap, BarChart3, Microscope, CheckCircle2, Loader2, TrendingUp, RefreshCw } from "lucide-react"
 
 interface ValidationControlsProps {
   onValidate: (mode: ValidationMode, selectedIndices?: number[]) => void
@@ -150,7 +150,7 @@ export function ValidationControls({
         {/* Action Button */}
         <Button
           onClick={() => onValidate(mode)}
-          disabled={isValidating || selectedCount === 0}
+          disabled={isValidating || selectedCount === 0 || (validationProgress && validationProgress.type === "complete")}
           className="w-full"
           size="lg"
         >
@@ -158,6 +158,11 @@ export function ValidationControls({
             <>
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               Validating...
+            </>
+          ) : validationProgress && validationProgress.type === "complete" ? (
+            <>
+              <CheckCircle2 className="mr-2 h-4 w-4" />
+              Validation Complete
             </>
           ) : (
             <>
@@ -189,7 +194,7 @@ export function ValidationControls({
               <span className="font-medium">Validation Complete!</span>
             </div>
             {validationProgress.summary && (
-              <div className="text-sm space-y-1">
+              <div className="text-sm space-y-1 mb-3">
                 <div>✅ Enriched: {validationProgress.summary.enriched} references</div>
                 <div>📦 From cache: {validationProgress.summary.from_cache} references</div>
                 <div>
@@ -197,6 +202,15 @@ export function ValidationControls({
                 </div>
               </div>
             )}
+            <Button
+              onClick={() => onValidate(mode)}
+              variant="outline"
+              size="sm"
+              className="w-full"
+            >
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Validate Again
+            </Button>
           </div>
         )}
       </CardContent>

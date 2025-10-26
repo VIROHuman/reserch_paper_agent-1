@@ -170,3 +170,26 @@ class SemanticScholarResponse(BaseModel):
     journal: Optional[Dict[str, Any]] = None
     doi: Optional[str] = None
     openAccessPdf: Optional[Dict[str, Any]] = None
+
+
+class ArxivResponse(BaseModel):
+    """ArXiv API response structure"""
+    arxiv_id: str
+    title: str
+    authors: List[Dict[str, Any]] = []
+    published: Optional[str] = None
+    summary: Optional[str] = None
+    categories: List[str] = []
+    url: Optional[str] = None
+
+
+class PubMedResponse(BaseModel):
+    """PubMed API response structure"""
+    pmid: str
+    title: str
+    authors: List[Dict[str, Any]] = []
+    journal: Optional[str] = None
+    year: Optional[int] = None
+    doi: Optional[str] = None
+    abstract: Optional[str] = None
+    publication_type: Optional[str] = None

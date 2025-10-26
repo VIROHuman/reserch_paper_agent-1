@@ -7,7 +7,7 @@ from loguru import logger
 from dataclasses import dataclass
 from enum import Enum
 
-from .api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient, PubMedClient, circuit_breaker
+from .api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient, PubMedClient, ArxivClient, circuit_breaker
 from .text_normalizer import text_normalizer
 
 
@@ -17,6 +17,7 @@ class APIProvider(Enum):
     SEMANTIC_SCHOLAR = "semantic_scholar"
     DOAJ = "doaj"
     PUBMED = "pubmed"
+    ARXIV = "arxiv"
 
 
 @dataclass
@@ -48,6 +49,7 @@ class SmartAPIStrategy:
         self.semantic_client = SemanticScholarClient()
         self.doaj_client = DOAJClient()
         self.pubmed_client = PubMedClient()
+        self.arxiv_client = ArxivClient()
         
         # No domain filtering - support all research domains
         self.domain_whitelist = None  # Disabled
@@ -57,6 +59,7 @@ class SmartAPIStrategy:
             APIProvider.CROSSREF,
             APIProvider.OPENALEX,
             APIProvider.PUBMED,
+            APIProvider.ARXIV,
             APIProvider.SEMANTIC_SCHOLAR,
             APIProvider.DOAJ
         ]
@@ -675,7 +678,8 @@ class SmartAPIStrategy:
             selected_apis.extend([
                 APIProvider.CROSSREF,
                 APIProvider.SEMANTIC_SCHOLAR,
-                APIProvider.OPENALEX
+                APIProvider.OPENALEX,
+                APIProvider.ARXIV  # Include ArXiv for preprint detection
             ])
         
         # If we have authors + year, use author-friendly APIs
@@ -684,7 +688,8 @@ class SmartAPIStrategy:
             selected_apis.extend([
                 APIProvider.CROSSREF,
                 APIProvider.OPENALEX,
-                APIProvider.PUBMED
+                APIProvider.PUBMED,
+                APIProvider.ARXIV  # Include ArXiv for preprint detection
             ])
         
         # Fallback: use top 2 APIs
@@ -721,6 +726,8 @@ class SmartAPIStrategy:
                 results = await self.semantic_client.search_reference(query, limit=3)
             elif provider == APIProvider.PUBMED:
                 results = await self.pubmed_client.search_reference(query, limit=3)
+            elif provider == APIProvider.ARXIV:
+                results = await self.arxiv_client.search_reference(query, limit=3)
             elif provider == APIProvider.DOAJ:
                 results = await self.doaj_client.search_reference(query, limit=3)
             else:

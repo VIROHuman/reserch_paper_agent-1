@@ -22,7 +22,8 @@ class EnhancedReferenceParser:
         self.ner_parser = NERReferenceParser(
             confidence_threshold=0.1,  # Lowered to catch more entities
             enable_entity_disambiguation=True,
-            enable_confidence_weighting=True
+            enable_confidence_weighting=True,
+            use_llm_primary=False  # Disable LLM for stability - use NER only
         )
         
         # Keep simple parser as fallback
@@ -50,48 +51,86 @@ class EnhancedReferenceParser:
         """
         Convert NER parser result to the format expected by enhanced parser
         """
-        # Extract authors
-        authors = ner_result.get('authors', [])
-        family_names = []
-        given_names = []
-        
-        for author in authors:
-            if isinstance(author, dict):
-                # Dictionary format
-                if author.get('surname') and author.get('surname') != 'None':
-                    family_names.append(author['surname'])
-                if author.get('first_name') and author.get('first_name') != 'None':
-                    given_names.append(author['first_name'])
-            elif isinstance(author, str):
-                # String format
-                family_names.append(author)
-            elif hasattr(author, 'surname'):
-                # Pydantic Author object
-                if author.surname and author.surname != 'None':
-                    family_names.append(author.surname)
-                if author.first_name and author.first_name != 'None':
-                    given_names.append(author.first_name)
-        
-        return {
-            "family_names": family_names,
-            "given_names": given_names,
-            "year": ner_result.get('year'),
-            "title": ner_result.get('title'),
-            "journal": ner_result.get('journal'),
-            "volume": ner_result.get('volume'),
-            "issue": ner_result.get('issue'),
-            "pages": ner_result.get('pages'),
-            "doi": ner_result.get('doi'),
-            "url": ner_result.get('url'),
-            "publisher": ner_result.get('publisher'),
-            "abstract": ner_result.get('abstract'),
-            "publication_type": ner_result.get('publication_type'),
-            "raw_text": ner_result.get('raw_text', ''),
-            "missing_fields": ner_result.get('missing_fields', []),
-            "quality_score": ner_result.get('quality_score', 0.0),
-            "confidence_scores": ner_result.get('confidence_scores', {}),
-            "parser_used": "NER_MODEL"
-        }
+        try:
+            # Extract authors with robust error handling
+            authors = ner_result.get('authors', [])
+            logger.info(f"[DEBUG] Converting NER result - authors type: {type(authors)}, count: {len(authors)}")
+            if len(authors) > 0:
+                logger.info(f"[DEBUG] First author (if exists): {authors[0]}")
+                logger.info(f"[DEBUG] Authors full list: {authors}")
+            family_names = []
+            given_names = []
+            
+            for author in authors:
+                logger.info(f"[DEBUG] Processing author - type: {type(author)}, author keys: {author.keys() if isinstance(author, dict) else 'N/A'}")
+                try:
+                    if isinstance(author, dict):
+                        # Dictionary format - check both 'fnm' (alias) and 'first_name'
+                        # Also check for both 'surname' and 'family_name'
+                        surname = author.get('surname') or author.get('family_name') or ""
+                        first_name = author.get('first_name') or author.get('fnm') or ""
+                        
+                        # Only add if surname exists and is not 'None' string
+                        if surname and str(surname).lower() != 'none' and surname.strip():
+                            family_names.append(surname)
+                        if first_name and str(first_name).lower() != 'none' and first_name.strip():
+                            given_names.append(first_name)
+                    elif isinstance(author, str):
+                        # String format
+                        family_names.append(author)
+                    elif hasattr(author, 'surname'):
+                        # Pydantic Author object
+                        if author.surname and author.surname != 'None':
+                            family_names.append(author.surname)
+                        if author.first_name and author.first_name != 'None':
+                            given_names.append(author.first_name)
+                except Exception as author_error:
+                    logger.warning(f"Error processing author: {author_error}, skipping author")
+                    continue
+            
+            return {
+                "family_names": family_names,
+                "given_names": given_names,
+                "year": ner_result.get('year'),
+                "title": ner_result.get('title'),
+                "journal": ner_result.get('journal'),
+                "volume": ner_result.get('volume'),
+                "issue": ner_result.get('issue'),
+                "pages": ner_result.get('pages'),
+                "doi": ner_result.get('doi'),
+                "url": ner_result.get('url'),
+                "publisher": ner_result.get('publisher'),
+                "abstract": ner_result.get('abstract'),
+                "publication_type": ner_result.get('publication_type'),
+                "raw_text": ner_result.get('raw_text', ''),
+                "missing_fields": ner_result.get('missing_fields', []),
+                "quality_score": ner_result.get('quality_score', 0.0),
+                "confidence_scores": ner_result.get('confidence_scores', {}),
+                "parser_used": "NER_MODEL"
+            }
+        except Exception as e:
+            logger.error(f"Error converting NER result: {e}")
+            # Return a basic structure
+            return {
+                "family_names": [],
+                "given_names": [],
+                "year": None,
+                "title": None,
+                "journal": None,
+                "volume": None,
+                "issue": None,
+                "pages": None,
+                "doi": None,
+                "url": None,
+                "publisher": None,
+                "abstract": None,
+                "publication_type": None,
+                "raw_text": '',
+                "missing_fields": ['title', 'authors', 'year'],
+                "quality_score": 0.0,
+                "confidence_scores": {},
+                "parser_used": "NER_MODEL_ERROR"
+            }
     
     async def _enhanced_initial_parsing(self, ref_text: str) -> Dict[str, Any]:
         """Enhanced initial parsing using NER as primary method"""
@@ -99,6 +138,21 @@ class EnhancedReferenceParser:
             # Use NER parser as the primary parsing method
             logger.info(f"🤖 Using NER parser for initial parsing: {ref_text[:100]}...")
             parsed_ref = self.ner_parser.parse_reference_to_dict(ref_text)
+            
+            # DEBUG: Check what we got from NER parser
+            logger.info(f"[DEBUG] NER parser returned: authors count={len(parsed_ref.get('authors', [])) if parsed_ref else 0}")
+            if parsed_ref and len(parsed_ref.get('authors', [])) > 0:
+                logger.info(f"[DEBUG] First author from NER: {parsed_ref['authors'][0]}")
+            
+            # DEBUG: Check all keys in parsed_ref
+            if parsed_ref:
+                logger.info(f"[DEBUG] Keys in parsed_ref: {parsed_ref.keys()}")
+                logger.info(f"[DEBUG] Full parsed_ref structure: {parsed_ref}")
+            
+            # Check if NER parser returned None
+            if parsed_ref is None:
+                logger.warning("NER parser returned None, using simple parser fallback")
+                return self.simple_parser.parse_reference(ref_text)
             
             # Convert NER result to the expected format for further processing
             parsed_ref = self._convert_ner_result_to_enhanced_format(parsed_ref)
@@ -150,7 +204,29 @@ class EnhancedReferenceParser:
         except Exception as e:
             logger.error(f"Enhanced initial parsing error: {str(e)}")
             # Fallback to simple parser
-            return self.simple_parser.parse_reference(ref_text)
+            try:
+                fallback_result = self.simple_parser.parse_reference(ref_text)
+                if fallback_result is None:
+                    logger.error("Simple parser also returned None, creating empty result")
+                    return {
+                        "family_names": [],
+                        "given_names": [],
+                        "year": None,
+                        "title": None,
+                        "journal": None,
+                        "parser_used": "FALLBACK_EMPTY"
+                    }
+                return fallback_result
+            except Exception as fallback_error:
+                logger.error(f"Fallback parser also failed: {str(fallback_error)}")
+                return {
+                    "family_names": [],
+                    "given_names": [],
+                    "year": None,
+                    "title": None,
+                    "journal": None,
+                    "parser_used": "FALLBACK_ERROR"
+                }
     
     def _extract_title_enhanced(self, text: str) -> Optional[str]:
         """Enhanced title extraction with multiple robust strategies"""

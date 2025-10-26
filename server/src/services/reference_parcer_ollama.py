@@ -66,7 +66,7 @@ class AdvancedNERParser:
                  confidence_threshold: float = 0.1,  # Lowered to 0.1 to catch more entities
                  enable_entity_disambiguation: bool = True,
                  enable_confidence_weighting: bool = True,
-                 use_llm_primary: bool = False,  # Disabled for fast parsing; LLM used during validation
+                 use_llm_primary: bool = False,  # Disable LLM for stability - use NER only
                  ollama_base_url: str = "http://localhost:11434"):
         
         # Try to load the NER model with fallback
@@ -115,13 +115,20 @@ class AdvancedNERParser:
         try:
             response = requests.get(
                 f"{self.ollama_base_url}/api/tags",
-                timeout=2
+                timeout=3  # Increased slightly to 3 seconds
             )
             if response.status_code == 200:
                 print("✅ Ollama LLM ready for primary parsing")
                 return True
-        except Exception:
-            pass
+        except requests.exceptions.Timeout:
+            print("⚠️ Ollama connection timeout - falling back to NER only")
+            return False
+        except requests.exceptions.ConnectionError:
+            print("⚠️ Ollama not available - falling back to NER only")
+            return False
+        except Exception as e:
+            print(f"⚠️ Ollama connection error: {e} - falling back to NER only")
+            return False
         
         print("⚠️ Ollama not available - falling back to NER only")
         return False
@@ -195,7 +202,7 @@ class AdvancedNERParser:
         return False
     
     def _extract_authors_with_llm(self, raw_citation: str) -> List[Author]:
-        """Use LLM to extract authors from citation"""
+        """Use LLM to extract authors from citation with robust error handling"""
         try:
             prompt = f"""Extract ONLY the author names from this academic citation. Return them as a JSON array of objects with "full_name", "surname", and "first_name" fields.
 
@@ -214,7 +221,7 @@ Return ONLY valid JSON array, nothing else. Example format:
             response = requests.post(
                 f"{self.ollama_base_url}/api/generate",
                 json={
-                    "model": "llama3:latest",
+                    "model": "gemma3:4b",  # Using Gemma 3 4B model (correct Ollama model name)
                     "prompt": prompt,
                     "stream": False,
                     "options": {
@@ -222,20 +229,24 @@ Return ONLY valid JSON array, nothing else. Example format:
                         "top_p": 0.9
                     }
                 },
-                timeout=30
+                timeout=15  # Reduced timeout from 30 to 15 seconds for faster fallback
             )
             
             if response.status_code != 200:
-                print(f"❌ LLM request failed: {response.status_code}")
+                logger.warning(f"❌ LLM request failed with status {response.status_code}")
                 return []
             
             result = response.json()
             llm_output = result.get('response', '').strip()
             
+            if not llm_output:
+                logger.warning("⚠️ LLM returned empty response")
+                return []
+            
             # Extract JSON from response (sometimes LLM adds extra text)
             json_match = re.search(r'\[.*\]', llm_output, re.DOTALL)
             if not json_match:
-                print(f"⚠️ No JSON found in LLM output")
+                logger.warning(f"⚠️ No JSON found in LLM output: {llm_output[:100]}")
                 return []
             
             authors_data = json.loads(json_match.group(0))
@@ -243,20 +254,30 @@ Return ONLY valid JSON array, nothing else. Example format:
             # Convert to Author objects
             authors = []
             for author_dict in authors_data:
-                authors.append(Author(
-                    full_name=author_dict.get('full_name'),
-                    surname=author_dict.get('surname'),
-                    first_name=author_dict.get('first_name')
-                ))
+                try:
+                    authors.append(Author(
+                        full_name=author_dict.get('full_name'),
+                        surname=author_dict.get('surname'),
+                        first_name=author_dict.get('first_name')
+                    ))
+                except Exception as author_error:
+                    logger.warning(f"Error creating Author object: {author_error}")
+                    continue
             
-            print(f"✅ LLM extracted {len(authors)} authors")
+            logger.info(f"✅ LLM extracted {len(authors)} authors")
             return authors
             
+        except requests.exceptions.Timeout:
+            logger.warning("❌ LLM request timeout after 15 seconds")
+            return []
+        except requests.exceptions.ConnectionError:
+            logger.warning("❌ LLM connection error - Ollama may not be running")
+            return []
         except json.JSONDecodeError as e:
-            print(f"❌ JSON decode error from LLM: {e}")
+            logger.warning(f"❌ JSON decode error from LLM: {e}")
             return []
         except Exception as e:
-            print(f"❌ LLM extraction failed: {e}")
+            logger.warning(f"❌ LLM extraction failed: {e}")
             return []
     
     def _extract_raw_entities(self, text: str) -> List[Dict[str, Any]]:
@@ -354,17 +375,23 @@ Return ONLY valid JSON array, nothing else. Example format:
         if not author_text:
             return []
         
-        # CLEAN: Remove reference numbers like [26] or 27] at the start
+        # CLEAN: Only do minimal cleaning
+        # 1. Remove reference numbers like [26] or 27] at the start
         author_text = re.sub(r'^\s*\[?\d+\]\s*', '', author_text)
         
-        # CLEAN: Remove title fragments (anything after a period followed by a capital letter)
-        # E.g., "Lan Z, Chen M. Albert:" -> "Lan Z, Chen M"
-        author_text = re.sub(r'\.\s*[A-Z][a-z]+.*$', '', author_text)
+        # 2. Remove everything after " et al" 
+        author_text = re.sub(r'\s+et\s+al\.?.*$', '', author_text, flags=re.IGNORECASE)
+        
+        # 3. Remove trailing commas and periods
+        author_text = author_text.rstrip(',.')
+        
+        # 4. Stop at years (e.g., "Authors. Title 2024" -> stop at 2024)
+        author_text = re.sub(r'\s+\d{4}.*$', '', author_text)
         
         logger.info(f"📝 After cleaning: '{author_text}'")
         
-        # Final check
-        if not author_text or len(author_text) < 2:
+        # Final check - be more lenient, allow short initials
+        if not author_text or len(author_text.strip()) < 1:
             return []
         
         authors = []
@@ -384,20 +411,9 @@ Return ONLY valid JSON array, nothing else. Example format:
             comma_count = and_part.count(',')
             
             if comma_count >= 2:
-                # Likely merged authors: "Gu Y, Tinn R, Cheng H" or "Smith, J., Jones, P."
-                # 
-                # IMPROVED PATTERN:
-                # Split on comma when followed by:
-                # 1. Capital letter + lowercase (surname start): ", Smith"
-                # 2. Capital letter + space + capital (initial + surname): ", Y Tinn"
-                # 3. Capital letter alone or with period (surname alone): ", Y," or ", Y"
-                #
-                # Pattern explanation:
-                # (?=[A-Z](?:[a-z]|\s+[A-Z]|[,\s]|$))
-                # - [A-Z] = starts with capital
-                # - (?:[a-z]|\s+[A-Z]|[,\s]|$) = followed by lowercase OR space+capital OR comma/space/end
-                
-                parts = re.split(r',\s+(?=[A-Z](?:[a-z]|\s+[A-Z]|[,\s]|$))', and_part)
+                # Multiple authors separated by commas: "P. Wolfram, T. Wiedmann, M. Diesendorf"
+                # Simply split on commas
+                parts = and_part.split(',')
                 
                 for part in parts:
                     part = part.strip().rstrip(',')
@@ -424,13 +440,28 @@ Return ONLY valid JSON array, nothing else. Example format:
     def _parse_single_author(self, author_text: str) -> Author:
         """
         Parse a single author name
-        Handles: "Surname, F.", "Surname F", "FirstName MiddleName Surname", "F. M. Surname"
+        Handles: "Surname, F.", "Surname F", "FirstName MiddleName Surname", "F. M. Surname", "De Silva"
         """
         author_text = author_text.strip().rstrip(',').rstrip('.').strip()
         
         # Handle empty
         if not author_text or len(author_text) < 2:
             return Author(first_name="", surname="", full_name="")
+        
+        # Check for "De", "Van", "Von", etc. prefix (common in surnames)
+        surname_prefixes = ['de', 'van', 'von', 'la', 'le', 'du', 'da']
+        tokens = author_text.split()
+        
+        # Check if second-to-last token might be a prefix
+        if len(tokens) >= 2 and tokens[-2].lower() in surname_prefixes:
+            # "F. De Silva" -> surname="De Silva", first_name="F."
+            surname = f"{tokens[-2]} {tokens[-1]}"
+            first_name = ' '.join(tokens[:-2]) if len(tokens) > 2 else ""
+            return Author(
+                first_name=first_name,
+                surname=surname,
+                full_name=author_text
+            )
         
         if ',' in author_text:
             # "Surname, FirstName" format
@@ -445,7 +476,6 @@ Return ONLY valid JSON array, nothing else. Example format:
             )
         else:
             # "FirstName Surname" format
-            tokens = author_text.split()
             if len(tokens) >= 2:
                 surname = tokens[-1]
                 first_name = ' '.join(tokens[:-1])
@@ -565,22 +595,37 @@ Return ONLY valid JSON array, nothing else. Example format:
                 result_data['title'] = title_entity['text']
                 result_data['confidence_scores']['title'] = float(title_entity['confidence'])
         
-        # Authors - LLM PRIMARY for 100% accuracy
+        # Authors - LLM PRIMARY for 100% accuracy with robust error handling
         author_confidence = 0.0
         
-        # STRATEGY: Use LLM first for maximum accuracy
+        # STRATEGY: Use LLM first for maximum accuracy, but always fallback to NER on any error
         if self.llm_available:
-            # Try LLM first (primary method)
-            llm_authors = self._extract_authors_with_llm(raw_citation)
-            if llm_authors:
-                # Filter false positives
-                llm_authors = self._filter_false_positive_authors(llm_authors)
-                result_data['authors'] = llm_authors
-                result_data['confidence_scores']['authors'] = 0.95  # High confidence with LLM
-                result_data['ambiguity_flags'].append('llm_primary_extraction')
-            else:
-                # LLM failed, fallback to NER
-                print("⚠️ LLM extraction failed, using NER fallback...")
+            try:
+                # Try LLM first (primary method)
+                llm_authors = self._extract_authors_with_llm(raw_citation)
+                if llm_authors:
+                    # Filter false positives
+                    llm_authors = self._filter_false_positive_authors(llm_authors)
+                    result_data['authors'] = llm_authors
+                    result_data['confidence_scores']['authors'] = 0.95  # High confidence with LLM
+                    result_data['ambiguity_flags'].append('llm_primary_extraction')
+                else:
+                    # LLM returned empty, fallback to NER
+                    logger.warning("⚠️ LLM extraction returned empty, using NER fallback...")
+                    if 'AUTHORS' in grouped:
+                        author_entity = self._resolve_conflicts(grouped['AUTHORS'])
+                        if author_entity:
+                            ner_authors = self._parse_author_string(
+                                author_entity['text'],
+                                author_entity['confidence']
+                            )
+                            filtered_authors = self._filter_false_positive_authors(ner_authors)
+                            result_data['authors'] = filtered_authors
+                            result_data['confidence_scores']['authors'] = float(author_entity['confidence'])
+                            result_data['ambiguity_flags'].append('ner_fallback_used')
+            except Exception as llm_error:
+                # LLM extraction failed with exception, fallback to NER
+                logger.warning(f"⚠️ LLM extraction failed with error: {str(llm_error)}, using NER fallback...")
                 if 'AUTHORS' in grouped:
                     author_entity = self._resolve_conflicts(grouped['AUTHORS'])
                     if author_entity:
@@ -678,7 +723,7 @@ Return ONLY valid JSON array, nothing else. Example format:
             result_data['title']
         )
         
-        # Build Pydantic model
+        # Build Pydantic model with Author objects
         result = ReferenceData(**result_data)
         
         # Calculate quality metrics
@@ -686,7 +731,16 @@ Return ONLY valid JSON array, nothing else. Example format:
         result.confidence_scores['overall'] = float(quality_score)
         result.ambiguity_flags = ambiguities
         
-        return result.model_dump(by_alias=True)
+        # Convert to dict with proper Pydantic serialization
+        # This ensures Author objects inside the model are converted to dicts
+        dumped = result.model_dump(by_alias=True, mode='json')
+        
+        # DEBUG: Log what we're returning
+        logger.info(f"[DEBUG] After model_dump - authors count: {len(dumped.get('authors', []))}")
+        if len(dumped.get('authors', [])) > 0:
+            logger.info(f"[DEBUG] First author from dump: {dumped['authors'][0]}")
+        
+        return dumped
     
     def parse_batch(self, citations: List[str]) -> List[dict]:
         """Batch processing"""

@@ -15,7 +15,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { parseReferencesOnly, validateBatch, ParsedBatchData, ParsedReference, ValidationMode, ValidationProgress } from "@/lib/api"
+import { parseReferencesOnly, validateBatch, getBatchInfo, ParsedBatchData, ParsedReference, ValidationMode, ValidationProgress } from "@/lib/api"
 import { Sparkles, ArrowRight, FileText, CheckCircle2 } from "lucide-react"
 
 export default function Home() {
@@ -83,17 +83,36 @@ export default function Home() {
     try {
       setIsValidating(true)
       setValidationProgress(null)
+      
+      // First, check if batch is already validated
+      console.log("[DEBUG] Checking if batch already validated...")
+      const batchInfo = await getBatchInfo(parsedBatch.batch_id)
+      
+      if (batchInfo.success && batchInfo.data?.validation_status === "validated" && batchInfo.data?.validation_result) {
+        console.log("[DEBUG] Batch already validated, loading results")
+        setValidatedReferences(batchInfo.data.validation_result)
+        setActiveTab("validated")
+        setIsValidating(false)
+        return
+      }
 
+      console.log("[DEBUG] Starting validation with mode:", mode)
+      setValidatedReferences(null) // Clear previous results only if not already validated
+      
       const results = await validateBatch(
         parsedBatch.batch_id,
         mode,
         selectedIndices,
         (progress) => {
+          console.log("[DEBUG] Validation progress:", progress)
           setValidationProgress(progress)
         }
       )
 
+      console.log("[DEBUG] Validation completed, results:", results)
+      console.log("[DEBUG] Setting validatedReferences to:", results.length, "references")
       setValidatedReferences(results)
+      console.log("[DEBUG] Switching to validated tab")
       setActiveTab("validated")
     } catch (err) {
       console.error("Validation failed:", err)
@@ -249,6 +268,27 @@ export default function Home() {
               </TabsContent>
 
               <TabsContent value="validated" className="space-y-6">
+                {/* Validation Completion Message */}
+                {validationProgress && validationProgress.type === "complete" && (
+                  <Card className="border-green-200 bg-green-50 dark:bg-green-950/20 dark:border-green-800">
+                    <CardContent className="p-4">
+                      <div className="flex items-center gap-2 text-green-700 dark:text-green-400 mb-2">
+                        <CheckCircle2 className="h-5 w-5" />
+                        <span className="font-medium">Validation Complete!</span>
+                      </div>
+                      {validationProgress.summary && (
+                        <div className="text-sm space-y-1">
+                          <div>✅ Enriched: {validationProgress.summary.enriched} references</div>
+                          <div>📦 From cache: {validationProgress.summary.from_cache} references</div>
+                          <div>
+                            💾 Cache hit rate: {validationProgress.summary.cache_stats?.hit_rate || "N/A"}
+                          </div>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
+                
                 {validatedReferences && parsedBatch && (
                   <ResultsDashboard 
                     data={{

@@ -19,12 +19,9 @@ class CircuitBreaker:
         self.disabled_until = {}  # API name -> datetime when to re-enable
     
     def record_failure(self, api_name: str):
-        """Record a failure for an API"""
-        self.failures[api_name] = self.failures.get(api_name, 0) + 1
-        
-        if self.failures[api_name] >= self.failure_threshold:
-            self.disabled_until[api_name] = datetime.now() + timedelta(seconds=self.timeout_duration)
-            logger.warning(f"🚫 Circuit breaker: {api_name} disabled for {self.timeout_duration}s after {self.failures[api_name]} failures")
+        """Record a failure for an API - DISABLED"""
+        # Circuit breaker disabled - do nothing
+        pass
     
     def record_success(self, api_name: str):
         """Record a success for an API (resets failure count)"""
@@ -34,18 +31,8 @@ class CircuitBreaker:
             del self.disabled_until[api_name]
     
     def is_available(self, api_name: str) -> bool:
-        """Check if an API is available (not disabled by circuit breaker)"""
-        if api_name not in self.disabled_until:
-            return True
-        
-        if datetime.now() > self.disabled_until[api_name]:
-            # Timeout expired, re-enable the API
-            del self.disabled_until[api_name]
-            self.failures[api_name] = 0
-            logger.info(f"✅ Circuit breaker: {api_name} re-enabled")
-            return True
-        
-        return False
+        """Check if an API is available - ALWAYS TRUE (circuit breaker disabled)"""
+        return True
     
     def get_status(self) -> Dict[str, Any]:
         """Get circuit breaker status for all APIs"""
@@ -630,6 +617,186 @@ class DOAJClient:
         return references
 
 
+class ArxivClient:
+    """Client for ArXiv API (no API key required)"""
+    
+    def __init__(self):
+        self.base_url = "https://export.arxiv.org/api/query"
+        self.headers = {
+            "User-Agent": "ResearchPaperAgent/1.0"
+        }
+    
+    async def search_reference(self, query: str, limit: int = 5) -> List[ReferenceData]:
+        """Search ArXiv for references"""
+        api_name = "ArXiv"
+        
+        # Check circuit breaker
+        if not circuit_breaker.is_available(api_name):
+            logger.debug(f"{api_name}: Skipped (circuit breaker open)")
+            return []
+        
+        try:
+            async with httpx.AsyncClient() as client:
+                params = {
+                    "search_query": f"ti:{query} OR all:{query}",
+                    "start": 0,
+                    "max_results": limit,
+                    "sortBy": "relevance",
+                    "sortOrder": "descending"
+                }
+                
+                response = await client.get(
+                    self.base_url,
+                    headers=self.headers,
+                    params=params,
+                    timeout=None  # No timeout
+                )
+                
+                if response.status_code == 200:
+                    results = self._parse_arxiv_response(response.text)
+                    circuit_breaker.record_success(api_name)
+                    return results
+                
+                circuit_breaker.record_failure(api_name)
+                return []
+                
+        except Exception as e:
+            logger.debug(f"{api_name}: Error - {str(e)}")
+            circuit_breaker.record_failure(api_name)
+            return []
+    
+    def _parse_arxiv_response(self, xml_content: str) -> List[ReferenceData]:
+        """Parse ArXiv XML response"""
+        import xml.etree.ElementTree as ET
+        references = []
+        
+        try:
+            root = ET.fromstring(xml_content)
+            
+            for entry in root.findall('.//{http://www.w3.org/2005/Atom}entry'):
+                try:
+                    # Extract title
+                    title_elem = entry.find('.//{http://www.w3.org/2005/Atom}title')
+                    title = title_elem.text.strip() if title_elem is not None else None
+                    
+                    # Extract authors
+                    authors = []
+                    for author in entry.findall('.//{http://www.w3.org/2005/Atom}author'):
+                        name_elem = author.find('.//{http://www.w3.org/2005/Atom}name')
+                        if name_elem is not None:
+                            full_name = name_elem.text.strip()
+                            name_parts = full_name.split()
+                            if len(name_parts) >= 2:
+                                first_name = name_parts[0]
+                                surname = " ".join(name_parts[1:])
+                            else:
+                                first_name = None
+                                surname = full_name
+                            
+                            authors.append(Author(
+                                first_name=first_name,
+                                surname=surname,
+                                full_name=full_name
+                            ))
+                    
+                    # Extract publication date
+                    published_elem = entry.find('.//{http://www.w3.org/2005/Atom}published')
+                    year = None
+                    if published_elem is not None:
+                        try:
+                            year = int(published_elem.text[:4])
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    # Extract abstract
+                    summary_elem = entry.find('.//{http://www.w3.org/2005/Atom}summary')
+                    abstract = summary_elem.text.strip() if summary_elem is not None else None
+                    
+                    # Extract ArXiv ID
+                    arxiv_id_elem = entry.find('.//{http://www.w3.org/2005/Atom}id')
+                    arxiv_id = None
+                    arxiv_url = None
+                    if arxiv_id_elem is not None:
+                        arxiv_url = arxiv_id_elem.text
+                        # Extract ArXiv ID from URL
+                        if 'arxiv.org/abs/' in arxiv_url:
+                            arxiv_id = arxiv_url.split('arxiv.org/abs/')[-1]
+                    
+                    # Extract categories
+                    categories = []
+                    for category in entry.findall('.//{http://www.w3.org/2005/Atom}category'):
+                        term = category.get('term')
+                        if term:
+                            categories.append(term)
+                    
+                    # Determine publication type based on categories
+                    publication_type = "preprint"
+                    if categories:
+                        # Check if it's a journal paper that was also posted to ArXiv
+                        journal_indicators = ['journal', 'published', 'accepted']
+                        if any(indicator in str(categories).lower() for indicator in journal_indicators):
+                            publication_type = "journal-article"
+                    
+                    reference = ReferenceData(
+                        title=title,
+                        authors=authors,
+                        year=year,
+                        journal=f"arXiv:{arxiv_id}" if arxiv_id else "arXiv",
+                        doi=None,  # ArXiv doesn't have DOIs
+                        url=arxiv_url,
+                        abstract=abstract,
+                        publication_type=publication_type,
+                        raw_text=f"arXiv:{arxiv_id}" if arxiv_id else None
+                    )
+                    references.append(reference)
+                    
+                except Exception as e:
+                    logger.warning(f"Error parsing ArXiv entry: {str(e)}")
+                    continue
+            
+        except Exception as e:
+            logger.warning(f"Error parsing ArXiv XML: {str(e)}")
+        
+        return references
+    
+    async def get_arxiv_metadata(self, arxiv_id: str) -> Dict[str, Any]:
+        """Get metadata for a specific ArXiv paper"""
+        try:
+            async with httpx.AsyncClient() as client:
+                params = {
+                    "id_list": arxiv_id,
+                    "max_results": 1
+                }
+                
+                response = await client.get(
+                    self.base_url,
+                    headers=self.headers,
+                    params=params,
+                    timeout=None
+                )
+                
+                if response.status_code == 200:
+                    results = self._parse_arxiv_response(response.text)
+                    if results:
+                        ref = results[0]
+                        return {
+                            "arxiv_id": arxiv_id,
+                            "title": ref.title,
+                            "authors": [{"full_name": author.full_name} for author in ref.authors],
+                            "year": ref.year,
+                            "abstract": ref.abstract,
+                            "url": ref.url,
+                            "publication_type": ref.publication_type,
+                            "source_api": "ArXiv"
+                        }
+                
+                return {"error": "ArXiv paper not found"}
+                
+        except Exception as e:
+            logger.error(f"ArXiv metadata API error: {str(e)}")
+            return {"error": str(e)}
+
+
 class PubMedClient:
     """Client for PubMed/NCBI E-utilities API (no API key required)"""
     
@@ -680,7 +847,8 @@ class PubMedClient:
                 response = await client.get(
                     f"{self.base_url}/esearch.fcgi",
                     headers=self.headers,
-                    params=params
+                    params=params,
+                    timeout=None  # No timeout
                 )
                 
                 if response.status_code == 200:
@@ -705,7 +873,8 @@ class PubMedClient:
                 response = await client.get(
                     f"{self.base_url}/efetch.fcgi",
                     headers=self.headers,
-                    params=params
+                    params=params,
+                    timeout=None  # No timeout
                 )
                 
                 if response.status_code == 200:
@@ -771,6 +940,18 @@ class PubMedClient:
                     volume_elem = article.find('.//Volume')
                     volume = volume_elem.text if volume_elem is not None else None
                     
+                    # Extract issue
+                    issue_elem = article.find('.//Issue')
+                    issue = issue_elem.text if issue_elem is not None else None
+                    
+                    # Extract PMID
+                    pmid_elem = article.find('.//PMID')
+                    pmid = pmid_elem.text if pmid_elem is not None else None
+                    
+                    # Extract publication type
+                    pub_type_elem = article.find('.//PublicationType')
+                    pub_type = pub_type_elem.text if pub_type_elem is not None else "journal-article"
+                    
                     reference = ReferenceData(
                         title=title,
                         authors=authors,
@@ -780,18 +961,61 @@ class PubMedClient:
                         abstract=abstract,
                         pages=pages,
                         volume=volume,
-                        publication_type="journal-article"
+                        issue=issue,
+                        url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else None,
+                        publication_type=pub_type,
+                        raw_text=f"PMID: {pmid}" if pmid else None
                     )
                     references.append(reference)
                     
                 except Exception as e:
-                    logger.debug(f"Error parsing PubMed article: {str(e)}")
+                    logger.warning(f"Error parsing PubMed article: {str(e)}")
                     continue
             
         except Exception as e:
-            logger.debug(f"Error parsing PubMed XML: {str(e)}")
+            logger.warning(f"Error parsing PubMed XML: {str(e)}")
         
         return references
+    
+    async def get_pmid_metadata(self, pmid: str) -> Dict[str, Any]:
+        """Get metadata for a specific PMID"""
+        try:
+            async with httpx.AsyncClient() as client:
+                params = {
+                    "db": "pubmed",
+                    "id": pmid,
+                    "retmode": "xml"
+                }
+                
+                response = await client.get(
+                    f"{self.base_url}/efetch.fcgi",
+                    headers=self.headers,
+                    params=params,
+                    timeout=None
+                )
+                
+                if response.status_code == 200:
+                    results = self._parse_pubmed_xml(response.text)
+                    if results:
+                        ref = results[0]
+                        return {
+                            "pmid": pmid,
+                            "title": ref.title,
+                            "authors": [{"full_name": author.full_name} for author in ref.authors],
+                            "year": ref.year,
+                            "journal": ref.journal,
+                            "doi": ref.doi,
+                            "abstract": ref.abstract,
+                            "url": ref.url,
+                            "publication_type": ref.publication_type,
+                            "source_api": "PubMed"
+                        }
+                
+                return {"error": "PubMed article not found"}
+                
+        except Exception as e:
+            logger.error(f"PubMed metadata API error: {str(e)}")
+            return {"error": str(e)}
 
 
 # GROBID Client removed - using LLM for primary parsing

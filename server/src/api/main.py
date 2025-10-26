@@ -25,7 +25,7 @@ from ..utils.file_handler import FileHandler
 from ..utils.enhanced_parser import EnhancedReferenceParser
 from ..utils.job_manager import job_manager
 from ..utils.validation_service import ValidationService
-from ..utils.enrichment_cache import enrichment_cache
+# Cache removed as requested
 import xml.etree.ElementTree as ET
 import json
 
@@ -1089,6 +1089,36 @@ async def parse_references_only(
             
             batch_id = job_manager.create_parsed_batch(file_info, parsed_results)
             
+            # Calculate needs_validation safely
+            needs_validation_count = 0
+            if validation_service:
+                try:
+                    needs_validation_count = sum(
+                        1 for r in parsed_results
+                        if validation_service.needs_validation(r.get("extracted_fields", {}))
+                    )
+                except Exception as v_error:
+                    logger.warning(f"Error calculating validation needs: {v_error}")
+                    needs_validation_count = 0
+            
+            # Sanitize parsed_results to ensure JSON serializability
+            sanitized_results = []
+            for r in parsed_results:
+                try:
+                    # Test if it's JSON serializable
+                    json.dumps(r)
+                    sanitized_results.append(r)
+                except (TypeError, ValueError) as serialization_error:
+                    logger.error(f"Error serializing reference: {serialization_error}")
+                    # Create a safe fallback
+                    safe_result = {
+                        "index": r.get("index", 0),
+                        "original_text": str(r.get("original_text", ""))[:500],  # Limit text length
+                        "parser_used": "error",
+                        "error": f"Serialization error: {str(serialization_error)}"
+                    }
+                    sanitized_results.append(safe_result)
+            
             return APIResponse(
                 success=True,
                 message=f"Successfully parsed {successful_parsing}/{len(references)} references",
@@ -1101,12 +1131,9 @@ async def parse_references_only(
                         "successfully_parsed": successful_parsing,
                         "total_extracted_fields": total_extracted_fields,
                         "total_missing_fields": total_missing_fields,
-                        "needs_validation": sum(
-                            1 for r in parsed_results
-                            if validation_service.needs_validation(r.get("extracted_fields", {}))
-                        )
+                        "needs_validation": needs_validation_count
                     },
-                    "parsed_references": parsed_results
+                    "parsed_references": sanitized_results
                 }
             )
             
@@ -1186,24 +1213,47 @@ async def validate_batch_streaming(
         # Stream validation progress
         async def generate():
             try:
+                event_count = 0
                 async for event in validation_service.validate_batch_with_progress(
                     batch.parsed_references,
                     mode=mode,
                     selected_indices=indices
                 ):
-                    # Send event as JSON
-                    yield f"data: {json.dumps(event)}\n\n"
+                    event_count += 1
+                    event_type = event.get("type", "unknown")
                     
-                    # Store final results
-                    if event.get("type") == "complete":
-                        job_manager.update_batch_validation_status(
-                            batch_id,
-                            "validated",
-                            event.get("results")
-                        )
+                    # Log every event for debugging
+                    logger.info(f"📤 Streaming validation event #{event_count}: type={event_type}")
+                    
+                    # Try to send event as JSON with error handling
+                    try:
+                        event_json = json.dumps(event)
+                        logger.info(f"📤 Sending event data: {event_json[:200]}...")
+                        yield f"data: {event_json}\n\n"
+                        
+                        # Store final results
+                        if event_type == "complete":
+                            results_count = len(event.get('results', []))
+                            logger.info(f"✅ Sent complete event with {results_count} results")
+                            job_manager.update_batch_validation_status(
+                                batch_id,
+                                "validated",
+                                event.get("results")
+                            )
+                            # Send end-of-stream marker after complete event
+                            yield "data: [DONE]\n\n"
+                            logger.info("✅ Sent end-of-stream marker [DONE]")
+                    except Exception as serialization_error:
+                        logger.error(f"❌ Failed to serialize event: {serialization_error}")
+                        # Send error event instead
+                        error_event = {
+                            "type": "error",
+                            "message": f"Serialization error: {str(serialization_error)}"
+                        }
+                        yield f"data: {json.dumps(error_event)}\n\n"
                         
             except Exception as e:
-                logger.error(f"Validation streaming error: {str(e)}")
+                logger.error(f"❌ Validation streaming error: {str(e)}")
                 job_manager.update_batch_validation_status(batch_id, "failed")
                 error_event = {
                     "type": "error",
@@ -1228,25 +1278,7 @@ async def validate_batch_streaming(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/cache-stats", response_model=APIResponse)
-async def get_cache_stats():
-    """Get enrichment cache statistics"""
-    return APIResponse(
-        success=True,
-        message="Cache statistics",
-        data=enrichment_cache.get_stats()
-    )
-
-
-@app.post("/cache-clear", response_model=APIResponse)
-async def clear_cache():
-    """Clear the enrichment cache"""
-    enrichment_cache.clear()
-    return APIResponse(
-        success=True,
-        message="Cache cleared successfully",
-        data={}
-    )
+# Cache endpoints removed as requested
 
 
 if __name__ == "__main__":

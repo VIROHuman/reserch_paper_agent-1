@@ -52,12 +52,36 @@ class EnhancedReferenceParser:
         Convert NER parser result to the format expected by enhanced parser
         """
         try:
-            # Extract authors with robust error handling
+            # Check if the NER result already has family_names and given_names
+            # This means it was already converted by _convert_ner_to_api_format
+            if 'family_names' in ner_result and 'given_names' in ner_result:
+                logger.info("[DEBUG] NER result already has family_names/given_names structure")
+                # Return as-is (just ensure keys match)
+                return {
+                    "family_names": ner_result.get('family_names', []),
+                    "given_names": ner_result.get('given_names', []),
+                    "year": ner_result.get('year'),
+                    "title": ner_result.get('title'),
+                    "journal": ner_result.get('journal'),
+                    "volume": ner_result.get('volume'),
+                    "issue": ner_result.get('issue'),
+                    "pages": ner_result.get('pages'),
+                    "doi": ner_result.get('doi'),
+                    "url": ner_result.get('url'),
+                    "publisher": ner_result.get('publisher'),
+                    "abstract": ner_result.get('abstract'),
+                    "publication_type": ner_result.get('publication_type'),
+                    "raw_text": ner_result.get('raw_text'),
+                    "parser_used": ner_result.get('parser_used', 'NER_MODEL')
+                }
+            
+            # Otherwise, try to extract from 'authors' list
             authors = ner_result.get('authors', [])
             logger.info(f"[DEBUG] Converting NER result - authors type: {type(authors)}, count: {len(authors)}")
             if len(authors) > 0:
                 logger.info(f"[DEBUG] First author (if exists): {authors[0]}")
                 logger.info(f"[DEBUG] Authors full list: {authors}")
+            
             family_names = []
             given_names = []
             

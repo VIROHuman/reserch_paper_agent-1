@@ -82,9 +82,13 @@ class SmartAPIStrategy:
         enrichment_sources = []
         api_results = []
         
-        search_query = self._create_optimized_search_query(parsed_ref, original_text)
-        if not search_query:
+        search_query_strategies = self._create_optimized_search_query(parsed_ref, original_text)
+        if not search_query_strategies:
             return enriched_ref
+        
+        # Ensure search_query_strategies is a list
+        if isinstance(search_query_strategies, str):
+            search_query_strategies = [search_query_strategies]
         
         initial_quality = self._calculate_data_quality(parsed_ref)
         needs_enrichment = self._needs_enrichment(parsed_ref, initial_quality, force_enrichment)
@@ -109,26 +113,58 @@ class SmartAPIStrategy:
         apis_to_call = self._select_apis_smart(parsed_ref, aggressive_search)
         logger.info(f"🎯 Selected {len(apis_to_call)} APIs to call: {[api.value for api in apis_to_call]}")
         
-        # Parallel API calls for faster enrichment
-        logger.info("🚀 Calling APIs in parallel...")
-        api_tasks = [
-            self._call_api_without_timeout(provider, search_query, parsed_ref)
-            for provider in apis_to_call
-        ]
-        
-        # Wait for all APIs to complete (no timeout)
-        results = await asyncio.gather(*api_tasks, return_exceptions=True)
-        
-        # Process results
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.warning(f"{apis_to_call[i].value} API error: {result}")
-                continue
+        # Try each query strategy until we get results
+        api_results = []
+        for query_idx, search_query in enumerate(search_query_strategies):
+            logger.info(f"🔍 Trying query strategy {query_idx + 1}/{len(search_query_strategies)}: '{search_query[:80]}...'")
             
-            if result:
-                api_results.append(result)
-                enrichment_sources.append(result.provider.value)
-                logger.info(f"✅ {result.provider.value}: Found match (confidence: {result.confidence:.2f})")
+            # Parallel API calls for faster enrichment
+            logger.info("🚀 Calling APIs in parallel...")
+            api_tasks = [
+                self._call_api_without_timeout(provider, search_query, parsed_ref)
+                for provider in apis_to_call
+            ]
+            
+            # Wait for all APIs to complete (no timeout)
+            results = await asyncio.gather(*api_tasks, return_exceptions=True)
+            
+            # Process results
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.warning(f"{apis_to_call[i].value} API error: {result}")
+                    continue
+                
+                if result and result not in api_results:  # Avoid duplicates
+                    api_results.append(result)
+                    enrichment_sources.append(result.provider.value)
+                    logger.info(f"✅ {result.provider.value}: Found match (confidence: {result.confidence:.2f})")
+            
+            # If we got results, stop trying other strategies
+            if api_results:
+                logger.info(f"✅ Got results from strategy {query_idx + 1}, stopping search")
+                break
+        
+        # If still no results, try one more time with title-only
+        if not api_results and parsed_ref.get("title"):
+            title_query = parsed_ref.get("title")
+            logger.info(f"🔄 Last attempt with title-only query: '{title_query[:80]}...'")
+            api_tasks = [
+                self._call_api_without_timeout(provider, title_query, parsed_ref)
+                for provider in apis_to_call
+            ]
+            results = await asyncio.gather(*api_tasks, return_exceptions=True)
+            
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    continue
+                
+                if result and result not in api_results:
+                    api_results.append(result)
+                    enrichment_sources.append(result.provider.value)
+                    logger.info(f"✅ {result.provider.value}: Found match (confidence: {result.confidence:.2f})")
+        
+        # Log final results count
+        logger.info(f"📊 Total API results found: {len(api_results)}")
         
         # Apply multi-source adjudication if we have multiple results
         if len(api_results) > 1:
@@ -182,13 +218,14 @@ class SmartAPIStrategy:
             normalized_original = text_normalizer.normalize_text(original_text[:200])
             query_strategies.append(normalized_original)
         
-        # Return the best strategy (first one that exists)
+        # Return all viable strategies
+        viable_strategies = []
         for strategy in query_strategies:
             if strategy and len(strategy.strip()) > 5:
-                logger.info(f"Using query strategy: '{strategy[:100]}...'")
-                return strategy.strip()
+                viable_strategies.append(strategy.strip())
+                logger.info(f"Adding query strategy: '{strategy[:100]}...'")
         
-        return None
+        return viable_strategies if viable_strategies else None
     
     def _calculate_data_quality(self, parsed_ref: Dict[str, Any]) -> QualityMetrics:
         """Calculate comprehensive data quality metrics with improved scoring"""
@@ -789,8 +826,10 @@ class SmartAPIStrategy:
             if not hasattr(result, 'title') or not result.title:
                 continue
             
-            # Apply blocking filter first (most efficient)
-            if not self._passes_blocking_filter(parsed_ref, result, blocking_key):
+            # Apply blocking filter first (most efficient) - but skip if blocking key is too restrictive
+            # Only apply blocking if we have enough data, otherwise allow all candidates through
+            has_sufficient_data = bool(parsed_ref.get("family_names") and parsed_ref.get("year"))
+            if has_sufficient_data and not self._passes_blocking_filter(parsed_ref, result, blocking_key):
                 continue
             
             candidates_checked += 1
@@ -805,27 +844,35 @@ class SmartAPIStrategy:
                 result_title_norm
             )
             
-            # Require title similarity ≥ 0.70 (balanced approach)
-            if title_sim < 0.70:
+            # Check if we have authors - if not, relax requirements
+            has_authors = bool(parsed_ref.get("family_names"))
+            
+            # Require title similarity ≥ 0.50 (more relaxed to catch more matches)
+            if title_sim < 0.50:
                 continue
             
-            # Check year agreement within ±1
+            # Check year agreement within ±2 (more flexible)
             year_match = False
             if parsed_ref.get("year") and hasattr(result, 'year') and result.year:
                 try:
                     parsed_year = int(str(parsed_ref["year"]))
                     result_year = int(str(result.year))
-                    year_match = abs(parsed_year - result_year) <= 1
+                    year_match = abs(parsed_year - result_year) <= 2
                 except (ValueError, TypeError):
                     year_match = False
+            else:
+                # If no year in parsed_ref, don't require year match
+                year_match = True
             
-            if not year_match:
-                continue
-            
-            # Enhanced author matching
-            author_match_score = self._calculate_author_match_score(parsed_ref, result)
-            if author_match_score < 0.5:  # Require at least 50% author overlap
-                continue
+            # Only check author match if authors exist
+            author_match_score = 0.0
+            if has_authors:
+                author_match_score = self._calculate_author_match_score(parsed_ref, result)
+                if author_match_score < 0.5:  # Require at least 50% author overlap
+                    continue
+            else:
+                # No authors in original - don't require author match
+                author_match_score = 1.0
             
             # Domain whitelist check
             if not self._check_domain_whitelist(result):
@@ -833,10 +880,13 @@ class SmartAPIStrategy:
                 continue
             
             # Calculate composite match score
-            composite_score = self._calculate_composite_score(title_sim, year_match, author_match_score > 0.6, result)
+            # Allow lower threshold when no authors (title-only matching)
+            author_match_threshold = 0.6 if has_authors else 0.0
+            composite_score = self._calculate_composite_score(title_sim, year_match, author_match_score > author_match_threshold, result)
             
-            # Only consider matches with score ≥ 0.65 (balanced approach)
-            if composite_score >= 0.65 and composite_score > best_score:
+            # Only consider matches with score ≥ 0.50 (more relaxed to catch more matches)
+            min_score = 0.50
+            if composite_score >= min_score and composite_score > best_score:
                 best_score = composite_score
                 best_match = result
         
@@ -894,17 +944,26 @@ class SmartAPIStrategy:
         if len(parts1) != len(parts2):
             return False
         
-        # Check each component with some flexibility
+        # Check each component with more flexibility
         for i, (p1, p2) in enumerate(zip(parts1, parts2)):
-            if i == 0:  # Author name - must match exactly
-                if p1 != p2:
+            if i == 0:  # Author name - skip if empty, otherwise must match
+                if p1 and p2 and p1 != p2:
                     return False
-            elif i == 1:  # Year - must match exactly
-                if p1 != p2:
+                elif (not p1 or not p2):
+                    # If either is empty, don't block
+                    continue
+            elif i == 1:  # Year - skip if empty, otherwise must match
+                if p1 and p2 and p1 != p2:
                     return False
-            elif i == 2:  # Venue - allow partial match
-                if not self._venue_components_match(p1, p2):
+                elif (not p1 or not p2):
+                    # If either is empty, don't block
+                    continue
+            elif i == 2:  # Venue - allow partial match or skip if empty
+                if p1 and p2 and not self._venue_components_match(p1, p2):
                     return False
+                elif (not p1 or not p2):
+                    # If either is empty, don't block
+                    continue
         
         return True
     
@@ -997,16 +1056,24 @@ class SmartAPIStrategy:
         """Calculate composite match score ∈ [0, 1]"""
         score = 0.0
         
-        # Title similarity (40% weight)
-        score += title_sim * 0.4
+        # Title similarity - always weighted (50% weight when other fields missing)
+        weight_adjustment = 1.0
+        title_weight = 0.4
         
-        # Year match (25% weight)
+        # If no year or author info, give title more weight
+        if not year_match and not author_match:
+            title_weight = 0.6
+            weight_adjustment = 1.4  # Scale up remaining weights
+        
+        score += title_sim * title_weight
+        
+        # Year match (25% weight, scaled if author missing)
         if year_match:
-            score += 0.25
+            score += 0.25 * weight_adjustment
         
-        # Author match (25% weight)
+        # Author match (25% weight, scaled if year missing)
         if author_match:
-            score += 0.25
+            score += 0.25 * weight_adjustment
         
         # DOI presence bonus (10% weight)
         if hasattr(result, 'doi') and result.doi:

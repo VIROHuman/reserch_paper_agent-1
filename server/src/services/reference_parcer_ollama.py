@@ -475,10 +475,18 @@ Return ONLY valid JSON array, nothing else. Example format:
                 full_name=author_text
             )
         else:
-            # "FirstName Surname" format
+            # "FirstName Surname" format OR "Surname Initial" format
             if len(tokens) >= 2:
-                surname = tokens[-1]
-                first_name = ' '.join(tokens[:-1])
+                # Check if last token is a single letter (initial)
+                # If so, it's likely "Surname Initial" format (e.g., "Wang H")
+                if len(tokens[-1]) == 1 or (len(tokens[-1]) == 2 and tokens[-1][-1] == '.'):
+                    # Single letter = initial, so previous token is surname
+                    surname = tokens[-2] if len(tokens) >= 2 else tokens[-1]
+                    first_name = tokens[-1]  # The initial
+                else:
+                    # Regular "First Last" format
+                    surname = tokens[-1]
+                    first_name = ' '.join(tokens[:-1])
                 
                 return Author(
                     first_name=first_name,

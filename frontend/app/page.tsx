@@ -77,7 +77,7 @@ export default function Home() {
   }
 
   // Two-step workflow: Step 2 - Validate
-  const handleValidate = async (mode: ValidationMode, selectedIndices?: number[]) => {
+  const handleValidate = async (mode: ValidationMode, selectedIndices?: number[], selectedApis?: string[]) => {
     if (!parsedBatch) return
 
     try {
@@ -96,7 +96,7 @@ export default function Home() {
         return
       }
 
-      console.log("[DEBUG] Starting validation with mode:", mode)
+      console.log("[DEBUG] Starting validation with mode:", mode, "APIs:", selectedApis)
       setValidatedReferences(null) // Clear previous results only if not already validated
       
       const results = await validateBatch(
@@ -106,7 +106,8 @@ export default function Home() {
         (progress) => {
           console.log("[DEBUG] Validation progress:", progress)
           setValidationProgress(progress)
-        }
+        },
+        selectedApis
       )
 
       console.log("[DEBUG] Validation completed, results:", results)

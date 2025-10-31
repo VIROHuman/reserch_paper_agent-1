@@ -80,9 +80,11 @@ class ValidationService:
                 
                 logger.info(f"🔍 Validating reference {index}: {ref_text[:60]}...")
                 
+                # Parse with enrichment (no timeout - user controls API selection)
                 parsed_ref = await self.enhanced_parser.parse_reference_enhanced(
                     ref_text,
-                    enable_api_enrichment=True
+                    enable_api_enrichment=True,
+                    selected_apis=getattr(self, '_selected_apis', None)
                 )
                 
                 # Generate tagged output
@@ -140,7 +142,8 @@ class ValidationService:
         self,
         references: List[Dict[str, Any]],
         mode: str = "standard",  # quick, standard, thorough, custom
-        selected_indices: List[int] = None
+        selected_indices: List[int] = None,
+        selected_apis: List[str] = None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Validate a batch of references with progress updates (streaming)
@@ -193,6 +196,10 @@ class ValidationService:
                     if self.needs_validation(ref.get("extracted_fields", {}))
                 ]
         
+        # Store selected APIs for use during validation
+        if selected_apis:
+            self._selected_apis = selected_apis
+        
         total_to_validate = len(refs_to_validate)
         
         if total_to_validate == 0:
@@ -226,55 +233,159 @@ class ValidationService:
         cached_count = 0  # Always 0 since caching is disabled
         
         for batch_start in range(0, total_to_validate, batch_size):
-            batch_end = min(batch_start + batch_size, total_to_validate)
-            batch = refs_to_validate[batch_start:batch_end]
-            
-            # Process batch in parallel
-            tasks = [
-                self.validate_single_reference(ref, idx)
-                for idx, ref in batch
-            ]
-            
-            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Update results and count successes
-            for (idx, original_ref), result in zip(batch, batch_results):
-                if isinstance(result, Exception):
-                    logger.error(f"Error validating reference {idx}: {result}")
-                    continue
+            try:
+                batch_end = min(batch_start + batch_size, total_to_validate)
+                batch = refs_to_validate[batch_start:batch_end]
                 
-                validated_results[idx] = result
-                validated_count += 1
+                batch_num = batch_start//batch_size + 1
+                total_batches = (total_to_validate + batch_size - 1) // batch_size
+                logger.info(f"📦 Processing batch {batch_num}/{total_batches}: references {batch_start}-{batch_end-1}")
                 
-                # Check if enrichment was used
-                if result.get("api_enrichment_used"):
-                    enriched_count += 1
+                # Process batch in parallel (no timeout - user controls API selection)
+                tasks = [
+                    self.validate_single_reference(ref, idx)
+                    for idx, ref in batch
+                ]
                 
-                # Yield individual result
-                progress = int((validated_count / total_to_validate) * 100)
-                yield {
-                    "type": "result",
-                    "progress": progress,
-                    "current": validated_count,
-                    "total": total_to_validate,
-                    "index": idx,
-                    "data": result,
-                    "message": f"Validated reference {validated_count}/{total_to_validate}"
-                }
+                logger.debug(f"🔍 Starting asyncio.gather for batch {batch_num} with {len(tasks)} tasks...")
+                # Add timeout to prevent hangs (30s per ref * batch_size, max 180s total)
+                batch_timeout = min(180.0, 30.0 * len(tasks))
+                try:
+                    batch_results = await asyncio.wait_for(
+                        asyncio.gather(*tasks, return_exceptions=True),
+                        timeout=batch_timeout
+                    )
+                    logger.info(f"✅ Batch {batch_num} completed with {len(batch_results)} results")
+                except asyncio.TimeoutError:
+                    logger.warning(f"⚠️ Batch {batch_num} timed out after {batch_timeout}s - some references may be incomplete")
+                    # Create timeout error results for remaining tasks
+                    batch_results = []
+                    for idx, ref in batch:
+                        timeout_result = {
+                            **ref,
+                            "validation_error": f"Batch processing timed out after {batch_timeout}s",
+                            "api_enrichment_used": False
+                        }
+                        batch_results.append(timeout_result)
+                
+                # Update results and count successes
+                for (idx, original_ref), result in zip(batch, batch_results):
+                    try:
+                        if isinstance(result, Exception):
+                            logger.error(f"❌ Error validating reference {idx}: {result}")
+                            # Create error result to keep validation progressing
+                            error_result = {
+                                **original_ref,
+                                "validation_error": str(result),
+                                "api_enrichment_used": False
+                            }
+                            validated_results[idx] = error_result
+                            validated_count += 1  # Count even errors as processed
+                            
+                            # Yield error result
+                            progress = int((validated_count / total_to_validate) * 100)
+                            yield {
+                                "type": "result",
+                                "progress": progress,
+                                "current": validated_count,
+                                "total": total_to_validate,
+                                "index": idx,
+                                "data": error_result,
+                                "message": f"Validated reference {validated_count}/{total_to_validate} (with error)"
+                            }
+                            continue
+                        
+                        # Ensure result is a dict (safety check)
+                        if not isinstance(result, dict):
+                            logger.warning(f"⚠️ Reference {idx} returned non-dict result, converting...")
+                            result = {
+                                **original_ref,
+                                "validation_error": "Invalid result format",
+                                "api_enrichment_used": False
+                            }
+                        
+                        validated_results[idx] = result
+                        validated_count += 1
+                        
+                        # Check if enrichment was used
+                        if result.get("api_enrichment_used"):
+                            enriched_count += 1
+                        
+                        # Yield individual result
+                        progress = int((validated_count / total_to_validate) * 100)
+                        logger.info(f"📊 Progress: {validated_count}/{total_to_validate} references validated ({progress}%)")
+                        yield {
+                            "type": "result",
+                            "progress": progress,
+                            "current": validated_count,
+                            "total": total_to_validate,
+                            "index": idx,
+                            "data": result,
+                            "message": f"Validated reference {validated_count}/{total_to_validate}"
+                        }
+                    except Exception as result_error:
+                        # Even if processing a single result fails, continue
+                        logger.error(f"❌ Error processing result for reference {idx}: {result_error}")
+                        error_result = {
+                            **original_ref,
+                            "validation_error": f"Result processing error: {str(result_error)}",
+                            "api_enrichment_used": False
+                        }
+                        validated_results[idx] = error_result
+                        validated_count += 1
+                        progress = int((validated_count / total_to_validate) * 100)
+                        yield {
+                            "type": "result",
+                            "progress": progress,
+                            "current": validated_count,
+                            "total": total_to_validate,
+                            "index": idx,
+                            "data": error_result,
+                            "message": f"Validated reference {validated_count}/{total_to_validate} (with error)"
+                        }
+            except Exception as batch_error:
+                # If entire batch fails, mark all references in batch as errors and continue
+                logger.error(f"❌ Batch {batch_start//batch_size + 1} failed: {batch_error}")
+                # Get batch references that should have been processed
+                batch_end = min(batch_start + batch_size, total_to_validate)
+                failed_batch = refs_to_validate[batch_start:batch_end]
+                for idx, ref in failed_batch:
+                    error_result = {
+                        **ref,
+                        "validation_error": f"Batch processing error: {str(batch_error)}",
+                        "api_enrichment_used": False
+                    }
+                    validated_results[idx] = error_result
+                    validated_count += 1
+                    progress = int((validated_count / total_to_validate) * 100)
+                    yield {
+                        "type": "result",
+                        "progress": progress,
+                        "current": validated_count,
+                        "total": total_to_validate,
+                        "index": idx,
+                        "data": error_result,
+                        "message": f"Validated reference {validated_count}/{total_to_validate} (batch error)"
+                    }
+        
+        logger.info(f"✅ Completed all batches: {validated_count}/{total_to_validate} references validated")
         
         # Cache stats disabled
         cache_stats = {"hits": 0, "misses": 0, "size": 0}
         
         # Final complete message - convert dict to array for frontend
+        logger.info(f"📋 Converting {len(validated_results)} results to array format...")
         results_array = [validated_results[i] for i in range(len(references))]
         
         # Sanitize results to ensure JSON serializability
         sanitized_results = []
         for result in results_array:
             try:
+                # Deep sanitize the result
+                sanitized = self._sanitize_for_json(result)
                 # Test if it's JSON serializable
-                json.dumps(result)
-                sanitized_results.append(result)
+                json.dumps(sanitized, default=str)
+                sanitized_results.append(sanitized)
             except (TypeError, ValueError) as serialization_error:
                 logger.error(f"Error serializing validation result: {serialization_error}")
                 # Create a safe fallback
@@ -286,8 +397,8 @@ class ValidationService:
                 }
                 sanitized_results.append(safe_result)
         
-        logger.info(f"✅ Sending complete event with {len(sanitized_results)} sanitized results")
-        yield {
+        # Build complete event
+        complete_event = {
             "type": "complete",
             "progress": 100,
             "message": f"Validation complete! Enriched {enriched_count}/{total_to_validate} references",
@@ -300,6 +411,27 @@ class ValidationService:
                 "cache_stats": cache_stats
             }
         }
+        
+        # Test if complete event is serializable
+        try:
+            json.dumps(complete_event, default=str)
+            logger.info(f"✅ Sending complete event with {len(sanitized_results)} sanitized results")
+            yield complete_event
+        except Exception as final_error:
+            logger.error(f"❌ Failed to serialize complete event: {final_error}")
+            # Send minimal completion event
+            yield {
+                "type": "complete",
+                "progress": 100,
+                "message": f"Validation complete! Processed {validated_count} references",
+                "results": [],
+                "summary": {
+                    "total_references": len(references),
+                    "validated": validated_count,
+                    "enriched": enriched_count
+                },
+                "error": "Full results unavailable due to serialization error"
+            }
     
     async def _improve_authors_with_llm(self, parsed_ref: dict, ref_text: str):
         """
@@ -364,6 +496,25 @@ IMPORTANT:
         except Exception as e:
             logger.debug(f"LLM author extraction failed: {e}")
             # Silently fail, keep original NER results
+    
+    def _sanitize_for_json(self, obj: Any) -> Any:
+        """Recursively sanitize objects to ensure JSON serializability"""
+        if obj is None:
+            return None
+        elif isinstance(obj, (str, int, float, bool)):
+            return obj
+        elif isinstance(obj, dict):
+            return {k: self._sanitize_for_json(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._sanitize_for_json(item) for item in obj]
+        elif isinstance(obj, set):
+            return [self._sanitize_for_json(item) for item in obj]
+        else:
+            # Convert unknown types to string
+            try:
+                return str(obj)
+            except Exception:
+                return None
     
     def _build_full_names(self, parsed_ref: dict) -> list:
         """Build full names from family_names and given_names"""

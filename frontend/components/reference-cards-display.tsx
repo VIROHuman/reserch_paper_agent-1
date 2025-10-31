@@ -374,7 +374,10 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                               ? reference.extractedFields.fullNames.join("; ")
                               : reference.extractedFields?.familyNames?.length > 0 
                               ? reference.extractedFields.familyNames
-                                  .map((name, i) => `${name}, ${reference.extractedFields?.givenNames?.[i] || "?"}`)
+                                  .map((family, i) => {
+                                    const given = reference.extractedFields?.givenNames?.[i] || ""
+                                    return given ? `${given} ${family}` : family
+                                  })
                                   .join("; ")
                               : "N/A"
                             }

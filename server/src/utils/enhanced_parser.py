@@ -944,7 +944,8 @@ class EnhancedReferenceParser:
     async def parse_reference_enhanced(
         self, 
         ref_text: str, 
-        enable_api_enrichment: bool = True
+        enable_api_enrichment: bool = True,
+        selected_apis: List[str] = None
     ) -> Dict[str, Any]:
         try:
             logger.info(f"🔧 parse_reference_enhanced called with enable_api_enrichment={enable_api_enrichment}")
@@ -978,7 +979,8 @@ class EnhancedReferenceParser:
                         ref_text,
                         force_enrichment=True,
                         aggressive_search=True,  # New parameter for aggressive search
-                        fill_missing_fields=True  # New parameter to fill missing fields
+                        fill_missing_fields=True,  # New parameter to fill missing fields
+                        selected_apis=selected_apis  # User-selected APIs
                     )
                     enriched_ref["parser_used"] = parser_used
                     enriched_ref["api_enrichment_used"] = True
@@ -1000,6 +1002,18 @@ class EnhancedReferenceParser:
                     )
                     
                     enriched_ref["flagging_analysis"] = self.flagging_system.format_flags_for_api(flags)
+                    
+                    # Ensure full_names are always built from family_names and given_names
+                    if enriched_ref.get("family_names") and not enriched_ref.get("full_names"):
+                        full_names = []
+                        family_names = enriched_ref.get("family_names", [])
+                        given_names = enriched_ref.get("given_names", [])
+                        for i, family in enumerate(family_names):
+                            if i < len(given_names) and given_names[i]:
+                                full_names.append(f"{given_names[i]} {family}")
+                            else:
+                                full_names.append(family)
+                        enriched_ref["full_names"] = full_names
                     
                     # Calculate missing fields properly
                     missing_fields = self._calculate_missing_fields(enriched_ref)
@@ -1037,6 +1051,18 @@ class EnhancedReferenceParser:
             )
             
             parsed_ref["flagging_analysis"] = self.flagging_system.format_flags_for_api(flags)
+            
+            # Ensure full_names are always built from family_names and given_names (even without API enrichment)
+            if parsed_ref.get("family_names") and not parsed_ref.get("full_names"):
+                full_names = []
+                family_names = parsed_ref.get("family_names", [])
+                given_names = parsed_ref.get("given_names", [])
+                for i, family in enumerate(family_names):
+                    if i < len(given_names) and given_names[i]:
+                        full_names.append(f"{given_names[i]} {family}")
+                    else:
+                        full_names.append(family)
+                parsed_ref["full_names"] = full_names
             
             # Calculate missing fields properly
             missing_fields = self._calculate_missing_fields(parsed_ref)

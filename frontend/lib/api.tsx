@@ -566,13 +566,17 @@ class ApiClient {
     batchId: string,
     mode: ValidationMode = "standard",
     selectedIndices?: number[],
-    onProgress?: (progress: ValidationProgress) => void
+    onProgress?: (progress: ValidationProgress) => void,
+    selectedApis?: string[]
   ): Promise<ParsedReference[]> {
     try {
       const formData = new FormData()
       formData.append("mode", mode)
       if (selectedIndices && selectedIndices.length > 0) {
         formData.append("selected_indices", JSON.stringify(selectedIndices))
+      }
+      if (selectedApis && selectedApis.length > 0) {
+        formData.append("selected_apis", JSON.stringify(selectedApis))
       }
 
       console.log(`[API] Starting validation for batch ${batchId} (mode: ${mode})`)

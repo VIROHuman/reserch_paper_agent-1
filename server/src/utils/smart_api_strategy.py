@@ -76,7 +76,8 @@ class SmartAPIStrategy:
         original_text: str,
         force_enrichment: bool = True,
         aggressive_search: bool = False,
-        fill_missing_fields: bool = False
+        fill_missing_fields: bool = False,
+        selected_apis: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         enriched_ref = parsed_ref.copy()
         enrichment_sources = []
@@ -109,9 +110,24 @@ class SmartAPIStrategy:
         
         current_quality = initial_quality  # Initialize current_quality
         
-        # Smart filtering: decide which APIs to call based on existing data
-        apis_to_call = self._select_apis_smart(parsed_ref, aggressive_search)
-        logger.info(f"🎯 Selected {len(apis_to_call)} APIs to call: {[api.value for api in apis_to_call]}")
+        # Smart filtering: decide which APIs to call based on existing data or user selection
+        if selected_apis:
+            # User has selected specific APIs - use only those
+            apis_to_call = [APIProvider(api) for api in selected_apis if api in [p.value for p in APIProvider]]
+            logger.info(f"👤 User selected {len(apis_to_call)} APIs: {[api.value for api in apis_to_call]}")
+        else:
+            # Auto-select APIs based on data quality
+            apis_to_call = self._select_apis_smart(parsed_ref, aggressive_search)
+            logger.info(f"🎯 Auto-selected {len(apis_to_call)} APIs to call: {[api.value for api in apis_to_call]}")
+        
+        if not apis_to_call:
+            logger.warning("⚠️ No APIs selected for enrichment")
+            enriched_ref["api_enrichment_used"] = False
+            enriched_ref["enrichment_sources"] = []
+            enriched_ref["quality_improvement"] = 0.0
+            enriched_ref["final_quality_score"] = initial_quality.overall_confidence
+            enriched_ref["author_analysis"] = author_analysis
+            return enriched_ref
         
         # Try each query strategy until we get results
         api_results = []
@@ -125,8 +141,17 @@ class SmartAPIStrategy:
                 for provider in apis_to_call
             ]
             
-            # Wait for all APIs to complete (no timeout)
-            results = await asyncio.gather(*api_tasks, return_exceptions=True)
+            # Wait for all APIs to complete with overall timeout (max 90s for all APIs)
+            # Each API has its own 30s timeout, but protect against overall hangs
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(*api_tasks, return_exceptions=True),
+                    timeout=90.0  # Max 90 seconds for all parallel calls
+                )
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ Overall API call timeout - some APIs may have hung")
+                # Return whatever we got (may be incomplete)
+                results = [None] * len(api_tasks)
             
             # Process results
             for i, result in enumerate(results):
@@ -152,7 +177,15 @@ class SmartAPIStrategy:
                 self._call_api_without_timeout(provider, title_query, parsed_ref)
                 for provider in apis_to_call
             ]
-            results = await asyncio.gather(*api_tasks, return_exceptions=True)
+            # Wait for all APIs to complete with overall timeout (max 90s for all APIs)
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(*api_tasks, return_exceptions=True),
+                    timeout=90.0  # Max 90 seconds for all parallel calls
+                )
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ Overall API call timeout on title-only query - some APIs may have hung")
+                results = [None] * len(api_tasks)
             
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
@@ -166,27 +199,57 @@ class SmartAPIStrategy:
         # Log final results count
         logger.info(f"📊 Total API results found: {len(api_results)}")
         
-        # Apply multi-source adjudication if we have multiple results
-        if len(api_results) > 1:
-            logger.info(f"Applying multi-source adjudication for {len(api_results)} sources")
-            enriched_ref = self._apply_multi_source_adjudication(enriched_ref, api_results, fill_missing_fields)
-        elif len(api_results) == 1:
-            # Single source - merge directly
-            enriched_ref = self._merge_api_result(enriched_ref, api_results[0], fill_missing_fields)
-        
-        # Calculate final quality
-        current_quality = self._calculate_data_quality(enriched_ref)
-        
-        final_quality = self._calculate_data_quality(enriched_ref)
-        final_author_analysis = self._analyze_authors(enriched_ref)
-        
-        enriched_ref["api_enrichment_used"] = len(enrichment_sources) > 0
-        enriched_ref["enrichment_sources"] = enrichment_sources
-        enriched_ref["quality_improvement"] = final_quality.overall_confidence - initial_quality.overall_confidence
-        enriched_ref["final_quality_score"] = final_quality.overall_confidence
-        enriched_ref["author_analysis"] = final_author_analysis
-        
-        return enriched_ref
+        try:
+            # Apply multi-source adjudication if we have multiple results
+            if len(api_results) > 1:
+                logger.info(f"Applying multi-source adjudication for {len(api_results)} sources")
+                enriched_ref = self._apply_multi_source_adjudication(enriched_ref, api_results, fill_missing_fields)
+            elif len(api_results) == 1:
+                # Single source - merge directly
+                logger.info(f"Merging result from {api_results[0].provider.value}")
+                enriched_ref = self._merge_api_result(enriched_ref, api_results[0], fill_missing_fields)
+            else:
+                logger.debug("No API results to merge, returning parsed reference as-is")
+            
+            # Always ensure full_names are built before returning
+            if "family_names" in enriched_ref and enriched_ref.get("family_names"):
+                if "full_names" not in enriched_ref or not enriched_ref.get("full_names"):
+                    full_names = []
+                    family_names = enriched_ref.get("family_names", [])
+                    given_names = enriched_ref.get("given_names", [])
+                    for i, family in enumerate(family_names):
+                        if i < len(given_names) and given_names[i]:
+                            full_names.append(f"{given_names[i]} {family}")
+                        else:
+                            full_names.append(family)
+                    enriched_ref["full_names"] = full_names
+                    logger.info(f"📝 Ensured full_names built: {full_names}")
+            
+            # Calculate final quality
+            try:
+                current_quality = self._calculate_data_quality(enriched_ref)
+                final_quality = self._calculate_data_quality(enriched_ref)
+                final_author_analysis = self._analyze_authors(enriched_ref)
+                
+                enriched_ref["api_enrichment_used"] = len(enrichment_sources) > 0
+                enriched_ref["enrichment_sources"] = enrichment_sources
+                enriched_ref["quality_improvement"] = final_quality.overall_confidence - initial_quality.overall_confidence
+                enriched_ref["final_quality_score"] = final_quality.overall_confidence
+                enriched_ref["author_analysis"] = final_author_analysis
+            except Exception as quality_error:
+                logger.warning(f"Error calculating quality metrics: {quality_error}")
+                enriched_ref["api_enrichment_used"] = len(enrichment_sources) > 0
+                enriched_ref["enrichment_sources"] = enrichment_sources
+            
+            logger.info(f"✅ Enrichment complete for reference: {enriched_ref.get('title', 'Unknown')[:50]}...")
+            return enriched_ref
+            
+        except Exception as merge_error:
+            logger.error(f"❌ Error during API result merging: {merge_error}")
+            # Return the original parsed reference with minimal enrichment info
+            enriched_ref["api_enrichment_used"] = False
+            enriched_ref["enrichment_sources"] = []
+            return enriched_ref
     
     def _create_optimized_search_query(self, parsed_ref: Dict[str, Any], original_text: str) -> Optional[str]:
         """Create optimized search query with better strategies and blocking keys"""
@@ -481,6 +544,19 @@ class SmartAPIStrategy:
                 enriched_ref[field] = value
                 logger.info(f"Applied adjudicated {field}: {value}")
         
+        # Always rebuild full_names after adjudication (in case authors were updated)
+        if "family_names" in enriched_ref and enriched_ref.get("family_names"):
+            full_names = []
+            family_names = enriched_ref.get("family_names", [])
+            given_names = enriched_ref.get("given_names", [])
+            for i, family in enumerate(family_names):
+                if i < len(given_names) and given_names[i]:
+                    full_names.append(f"{given_names[i]} {family}")
+                else:
+                    full_names.append(family)
+            enriched_ref["full_names"] = full_names
+            logger.info(f"📝 Built full_names after adjudication: {full_names}")
+        
         # Store conflict information
         if conflicts:
             enriched_ref["adjudication_conflicts"] = conflicts
@@ -745,7 +821,7 @@ class SmartAPIStrategy:
         return unique_apis
     
     async def _call_api_without_timeout(self, provider: APIProvider, query: str, parsed_ref: Dict[str, Any]) -> Optional[APIResult]:
-        """Call API without timeout - let circuit breaker handle failures"""
+        """Call API with reasonable timeout to prevent hangs"""
         start_time = asyncio.get_event_loop().time()
         results = None
         
@@ -754,20 +830,43 @@ class SmartAPIStrategy:
             if provider == APIProvider.SEMANTIC_SCHOLAR:
                 await asyncio.sleep(1.0)
             
-            # Call the appropriate API WITHOUT timeout
-            if provider == APIProvider.CROSSREF:
-                results = await self.crossref_client.search_reference(query, limit=3)
-            elif provider == APIProvider.OPENALEX:
-                results = await self.openalex_client.search_reference(query, limit=3)
-            elif provider == APIProvider.SEMANTIC_SCHOLAR:
-                results = await self.semantic_client.search_reference(query, limit=3)
-            elif provider == APIProvider.PUBMED:
-                results = await self.pubmed_client.search_reference(query, limit=3)
-            elif provider == APIProvider.ARXIV:
-                results = await self.arxiv_client.search_reference(query, limit=3)
-            elif provider == APIProvider.DOAJ:
-                results = await self.doaj_client.search_reference(query, limit=3)
-            else:
+            # Call the appropriate API with timeout (30s max per API to prevent hangs)
+            timeout = 30.0  # 30 seconds max per API call
+            try:
+                if provider == APIProvider.CROSSREF:
+                    results = await asyncio.wait_for(
+                        self.crossref_client.search_reference(query, limit=3),
+                        timeout=timeout
+                    )
+                elif provider == APIProvider.OPENALEX:
+                    results = await asyncio.wait_for(
+                        self.openalex_client.search_reference(query, limit=3),
+                        timeout=timeout
+                    )
+                elif provider == APIProvider.SEMANTIC_SCHOLAR:
+                    results = await asyncio.wait_for(
+                        self.semantic_client.search_reference(query, limit=3),
+                        timeout=timeout
+                    )
+                elif provider == APIProvider.PUBMED:
+                    results = await asyncio.wait_for(
+                        self.pubmed_client.search_reference(query, limit=3),
+                        timeout=timeout
+                    )
+                elif provider == APIProvider.ARXIV:
+                    results = await asyncio.wait_for(
+                        self.arxiv_client.search_reference(query, limit=3),
+                        timeout=timeout
+                    )
+                elif provider == APIProvider.DOAJ:
+                    results = await asyncio.wait_for(
+                        self.doaj_client.search_reference(query, limit=3),
+                        timeout=timeout
+                    )
+                else:
+                    return None
+            except asyncio.TimeoutError:
+                logger.warning(f"⏱️ {provider.value}: Request timed out after {timeout}s")
                 return None
             
             response_time = asyncio.get_event_loop().time() - start_time
@@ -777,36 +876,40 @@ class SmartAPIStrategy:
                 logger.debug(f"{provider.value}: No results found")
                 return None
             
-            # Find best match and assess quality
-            best_match = self._find_best_match_smart(parsed_ref, results)
-            if not best_match:
-                logger.debug(f"{provider.value}: No good match found")
+            # Find best match and assess quality with exception handling
+            try:
+                best_match = self._find_best_match_smart(parsed_ref, results)
+                if not best_match:
+                    logger.debug(f"{provider.value}: No good match found")
+                    return None
+                
+                # Convert to our format
+                converted_data = self._convert_to_parsed_format(best_match)
+                
+                # Calculate quality metrics
+                quality_score = self._calculate_match_quality(parsed_ref, converted_data)
+                confidence = self._calculate_confidence(converted_data)
+                
+                logger.info(f"✓ {provider.value}: Match found (quality: {quality_score:.2f}, confidence: {confidence:.2f})")
+                
+                return APIResult(
+                    provider=provider,
+                    data=converted_data,
+                    quality_score=quality_score,
+                    confidence=confidence,
+                    fields_found=[k for k, v in converted_data.items() if v],
+                    response_time=response_time
+                )
+            except Exception as process_error:
+                logger.error(f"❌ {provider.value}: Error processing results: {process_error}")
                 return None
-            
-            # Convert to our format
-            converted_data = self._convert_to_parsed_format(best_match)
-            
-            # Calculate quality metrics
-            quality_score = self._calculate_match_quality(parsed_ref, converted_data)
-            confidence = self._calculate_confidence(converted_data)
-            
-            logger.info(f"✓ {provider.value}: Match found (quality: {quality_score:.2f}, confidence: {confidence:.2f})")
-            
-            return APIResult(
-                provider=provider,
-                data=converted_data,
-                quality_score=quality_score,
-                confidence=confidence,
-                fields_found=[k for k, v in converted_data.items() if v],
-                response_time=response_time
-            )
             
         except Exception as e:
             error_msg = str(e)
             if "429" in error_msg or "rate limit" in error_msg.lower():
                 logger.warning(f"🚫 {provider.value}: Rate limited - {error_msg}")
             else:
-                logger.debug(f"{provider.value}: Error - {error_msg}")
+                logger.warning(f"{provider.value}: Error - {error_msg}")
             return None
     
     def _find_best_match_smart(self, parsed_ref: Dict[str, Any], api_results: List[Any]) -> Optional[Any]:
@@ -821,7 +924,10 @@ class SmartAPIStrategy:
         best_match = None
         best_score = 0.0
         candidates_checked = 0
+        blocking_filter_enabled = True
+        blocking_filter_passed_count = 0
         
+        # First pass: try with blocking filter enabled
         for result in api_results:
             if not hasattr(result, 'title') or not result.title:
                 continue
@@ -829,8 +935,10 @@ class SmartAPIStrategy:
             # Apply blocking filter first (most efficient) - but skip if blocking key is too restrictive
             # Only apply blocking if we have enough data, otherwise allow all candidates through
             has_sufficient_data = bool(parsed_ref.get("family_names") and parsed_ref.get("year"))
-            if has_sufficient_data and not self._passes_blocking_filter(parsed_ref, result, blocking_key):
-                continue
+            if has_sufficient_data and blocking_filter_enabled:
+                if not self._passes_blocking_filter(parsed_ref, result, blocking_key):
+                    continue
+                blocking_filter_passed_count += 1
             
             candidates_checked += 1
             logger.debug(f"Checking candidate {candidates_checked}: title='{result.title[:60]}...'")
@@ -891,6 +999,74 @@ class SmartAPIStrategy:
                 best_score = composite_score
                 best_match = result
                 logger.info(f"✅ Found valid match with score {composite_score:.2f} (title_sim={title_sim:.2f}, year_match={year_match}, author_match={author_match_score > author_match_threshold})")
+        
+        # If blocking filter filtered out all candidates, try again without blocking filter
+        if blocking_filter_enabled and candidates_checked == 0 and blocking_filter_passed_count == 0:
+            logger.warning(f"⚠️ Blocking filter rejected all candidates - retrying without blocking filter")
+            blocking_filter_enabled = False
+            # Retry without blocking filter
+            for result in api_results:
+                if not hasattr(result, 'title') or not result.title:
+                    continue
+                
+                candidates_checked += 1
+                logger.debug(f"Checking candidate {candidates_checked} (no blocking filter): title='{result.title[:60]}...'")
+                
+                # Normalize titles for better comparison
+                parsed_title_norm = text_normalizer.normalize_title(parsed_ref.get("title", ""))
+                result_title_norm = text_normalizer.normalize_title(result.title)
+                
+                # Calculate title similarity using multiple methods
+                title_sim = self._calculate_enhanced_similarity(
+                    parsed_title_norm, 
+                    result_title_norm
+                )
+                logger.debug(f"  Title similarity: {title_sim:.2f}")
+                
+                # Check if we have authors - if not, relax requirements
+                has_authors = bool(parsed_ref.get("family_names"))
+                
+                # Require title similarity ≥ 0.30 (much more relaxed to catch more matches)
+                if title_sim < 0.30:
+                    logger.debug(f"  ❌ Rejected: title similarity {title_sim:.2f} < 0.30")
+                    continue
+                
+                # Check year agreement within ±2 (more flexible)
+                year_match = False
+                if parsed_ref.get("year") and hasattr(result, 'year') and result.year:
+                    try:
+                        parsed_year = int(str(parsed_ref["year"]))
+                        result_year = int(str(result.year))
+                        year_match = abs(parsed_year - result_year) <= 2
+                    except (ValueError, TypeError):
+                        year_match = False
+                else:
+                    # If no year in parsed_ref, don't require year match
+                    year_match = True
+                
+                # Only check author match if authors exist - make it optional
+                author_match_score = 0.0
+                if has_authors:
+                    author_match_score = self._calculate_author_match_score(parsed_ref, result)
+                else:
+                    # No authors in original - don't require author match
+                    author_match_score = 1.0
+                
+                # Domain whitelist check
+                if not self._check_domain_whitelist(result):
+                    logger.warning(f"Domain check failed for journal: {getattr(result, 'journal', 'unknown')}")
+                    continue
+                
+                # Calculate composite match score
+                # Allow lower threshold when no authors (title-only matching)
+                author_match_threshold = 0.6 if has_authors else 0.0
+                composite_score = self._calculate_composite_score(title_sim, year_match, author_match_score > author_match_threshold, result)
+                
+                # Accept any match with score > 0 (no minimum threshold)
+                if composite_score > best_score:
+                    best_score = composite_score
+                    best_match = result
+                    logger.info(f"✅ Found valid match with score {composite_score:.2f} (title_sim={title_sim:.2f}, year_match={year_match}, author_match={author_match_score > author_match_threshold})")
         
         logger.info(f"Checked {candidates_checked} candidates, best match score: {best_score:.2f}")
         return best_match
@@ -1347,6 +1523,20 @@ class SmartAPIStrategy:
                     logger.info(f"Added more authors: {len(original_family)} → {len(api_family_names)}")
                 else:
                     logger.info(f"Kept original authors: {original_family}")
+        
+        # Always rebuild full_names after any author changes
+        if "family_names" in merged and merged.get("family_names"):
+            full_names = []
+            family_names = merged.get("family_names", [])
+            given_names = merged.get("given_names", [])
+            for i, family in enumerate(family_names):
+                if i < len(given_names) and given_names[i]:
+                    full_names.append(f"{given_names[i]} {family}")
+                else:
+                    full_names.append(family)
+            merged["full_names"] = full_names
+            if "authors" in merged_fields:
+                logger.info(f"📝 Rebuilt full_names: {full_names}")
         
         logger.info(f"Merged {len(merged_fields)} fields: {merged_fields}")
         return merged

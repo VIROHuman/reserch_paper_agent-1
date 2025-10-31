@@ -254,7 +254,7 @@ async def upload_pdf(
                             "extracted_fields": {
                                 "family_names": parsed_ref.get("family_names", []),
                                 "given_names": parsed_ref.get("given_names", []),
-                                "full_names": _build_full_names(parsed_ref),
+                                "full_names": parsed_ref.get("full_names") or _build_full_names(parsed_ref),
                                 "year": parsed_ref.get("year"),
                                 "title": parsed_ref.get("title"),
                                 "journal": parsed_ref.get("journal"),
@@ -443,6 +443,7 @@ async def process_file_with_progress(
                     "extracted_fields": {
                         "family_names": parsed_ref.get("family_names", []),
                         "given_names": parsed_ref.get("given_names", []),
+                        "full_names": parsed_ref.get("full_names") or _build_full_names(parsed_ref),
                         "year": parsed_ref.get("year"),
                         "title": parsed_ref.get("title"),
                         "journal": parsed_ref.get("journal"),
@@ -528,19 +529,50 @@ async def process_file_with_progress(
         }
     )
 
-    # Send completion event
-    completion_event = {
-        "type": "complete",
-        "data": result
-    }
-    logger.info(f"🎉 Sending completion event with {len(processing_results)} results")
-    yield completion_event
-    
-    # Send a final confirmation to ensure frontend receives the data
-    yield {
-        "type": "final",
-        "message": "Processing completed successfully"
-    }
+    # Safely serialize the result before sending
+    try:
+        # Convert Pydantic model to dict if needed
+        if hasattr(result, 'model_dump'):
+            result_dict = result.model_dump()
+        elif hasattr(result, 'dict'):
+            result_dict = result.dict()
+        else:
+            result_dict = result
+        
+        # Test serialization with default=str for any edge cases
+        json.dumps(result_dict, default=str)
+        
+        # Send completion event
+        completion_event = {
+            "type": "complete",
+            "data": result_dict
+        }
+        logger.info(f"🎉 Sending completion event with {len(processing_results)} results")
+        yield completion_event
+        
+        # Send a final confirmation to ensure frontend receives the data
+        yield {
+            "type": "final",
+            "message": "Processing completed successfully"
+        }
+    except Exception as serialization_error:
+        logger.error(f"❌ Failed to serialize final result: {serialization_error}")
+        # Send a simplified completion event
+        yield {
+            "type": "complete",
+            "message": f"Processing completed with {successful_processing} successful references",
+            "data": {
+                "success": True,
+                "summary": {
+                    "total_references": len(references),
+                    "successfully_processed": successful_processing
+                }
+            }
+        }
+        yield {
+            "type": "final",
+            "message": "Processing completed (simplified output due to serialization error)"
+        }
 
 
 @app.post("/upload-pdf-async")
@@ -681,6 +713,7 @@ async def process_file_async(
                         "extracted_fields": {
                             "family_names": parsed_ref.get("family_names", []),
                             "given_names": parsed_ref.get("given_names", []),
+                            "full_names": parsed_ref.get("full_names") or _build_full_names(parsed_ref),
                             "year": parsed_ref.get("year"),
                             "title": parsed_ref.get("title"),
                             "journal": parsed_ref.get("journal"),
@@ -812,30 +845,58 @@ async def upload_pdf_stream(
         file_type = file_handler.get_file_type(file_path)
         
         async def generate():
+            complete_sent = False
             try:
                 async for progress_update in process_file_with_progress(
                     file_path, file_type, paper_type, process_references,
                     enhanced_parser, pdf_extractor, word_processor
                 ):
-                    logger.info(f"📤 Streaming event: {progress_update.get('type', 'unknown')}")
-                    yield f"data: {progress_update}\n\n"
+                    event_type = progress_update.get('type', 'unknown')
+                    logger.info(f"📤 Streaming event: {event_type}")
                     
-                    # Only cleanup after we've sent the complete event
-                    if progress_update.get("type") == "complete":
-                        logger.info("✅ Complete event sent, waiting for stream to finish...")
+                    # Safely serialize the event
+                    try:
+                        event_json = json.dumps(progress_update, default=str)
+                        yield f"data: {event_json}\n\n"
+                    except Exception as serialization_error:
+                        logger.error(f"❌ Failed to serialize event: {serialization_error}")
+                        # Send a safe fallback event
+                        safe_event = {
+                            "type": event_type,
+                            "message": "Event data serialization failed"
+                        }
+                        yield f"data: {json.dumps(safe_event)}\n\n"
+                    
+                    # Track completion and wait for final event
+                    if event_type == "complete":
+                        complete_sent = True
+                        logger.info("✅ Complete event sent, waiting for final event...")
+                    elif event_type == "final" and complete_sent:
+                        logger.info("✅ Final event sent, closing stream...")
                         # Give a moment for the frontend to receive the data
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(0.5)
+                        # Send end-of-stream marker
+                        yield "data: [DONE]\n\n"
                         break
                         
             except Exception as e:
                 logger.error(f"❌ Streaming error: {str(e)}")
-                # Cleanup on error
-                file_handler.cleanup_file(file_path)
-                raise
+                # Send error event
+                error_event = {
+                    "type": "error",
+                    "message": f"Streaming failed: {str(e)}"
+                }
+                try:
+                    yield f"data: {json.dumps(error_event)}\n\n"
+                except Exception:
+                    yield "data: {\"type\":\"error\",\"message\":\"Streaming failed\"}\n\n"
             finally:
                 # Cleanup after streaming is complete
                 logger.info("🧹 Cleaning up file after stream completion")
-                file_handler.cleanup_file(file_path)
+                try:
+                    file_handler.cleanup_file(file_path)
+                except Exception as cleanup_error:
+                    logger.warning(f"Cleanup error: {cleanup_error}")
         
         return StreamingResponse(
             generate(),
@@ -1040,6 +1101,7 @@ async def parse_references_only(
                         "extracted_fields": {
                             "family_names": parsed_ref.get("family_names", []),
                             "given_names": parsed_ref.get("given_names", []),
+                            "full_names": parsed_ref.get("full_names") or _build_full_names(parsed_ref),
                             "year": parsed_ref.get("year"),
                             "title": parsed_ref.get("title"),
                             "journal": parsed_ref.get("journal"),
@@ -1179,7 +1241,8 @@ async def get_batch_info(batch_id: str):
 async def validate_batch_streaming(
     batch_id: str,
     mode: str = Form("standard"),  # quick, standard, thorough
-    selected_indices: str = Form(None)  # JSON array of indices
+    selected_indices: str = Form(None),  # JSON array of indices
+    selected_apis: str = Form(None)  # JSON array of API names to use
 ):
     """
     Step 2: Validate/enrich references with API calls (streaming)
@@ -1207,6 +1270,16 @@ async def validate_batch_streaming(
             except:
                 pass
         
+        # Parse selected APIs if provided
+        if selected_apis:
+            try:
+                selected_apis = json.loads(selected_apis)
+                logger.info(f"👤 User selected APIs: {selected_apis}")
+            except:
+                selected_apis = None
+        else:
+            selected_apis = None
+        
         # Update batch status
         job_manager.update_batch_validation_status(batch_id, "validating")
         
@@ -1217,7 +1290,8 @@ async def validate_batch_streaming(
                 async for event in validation_service.validate_batch_with_progress(
                     batch.parsed_references,
                     mode=mode,
-                    selected_indices=indices
+                    selected_indices=indices,
+                    selected_apis=selected_apis
                 ):
                     event_count += 1
                     event_type = event.get("type", "unknown")
@@ -1227,22 +1301,29 @@ async def validate_batch_streaming(
                     
                     # Try to send event as JSON with error handling
                     try:
-                        event_json = json.dumps(event)
+                        event_json = json.dumps(event, default=str)
                         logger.info(f"📤 Sending event data: {event_json[:200]}...")
                         yield f"data: {event_json}\n\n"
                         
-                        # Store final results
+                        # Store final results and close stream
                         if event_type == "complete":
                             results_count = len(event.get('results', []))
                             logger.info(f"✅ Sent complete event with {results_count} results")
-                            job_manager.update_batch_validation_status(
-                                batch_id,
-                                "validated",
-                                event.get("results")
-                            )
+                            try:
+                                job_manager.update_batch_validation_status(
+                                    batch_id,
+                                    "validated",
+                                    event.get("results")
+                                )
+                            except Exception as update_error:
+                                logger.warning(f"Failed to update batch status: {update_error}")
+                            
                             # Send end-of-stream marker after complete event
                             yield "data: [DONE]\n\n"
                             logger.info("✅ Sent end-of-stream marker [DONE]")
+                            # Break after sending complete event and [DONE] marker
+                            break
+                            
                     except Exception as serialization_error:
                         logger.error(f"❌ Failed to serialize event: {serialization_error}")
                         # Send error event instead
@@ -1251,15 +1332,23 @@ async def validate_batch_streaming(
                             "message": f"Serialization error: {str(serialization_error)}"
                         }
                         yield f"data: {json.dumps(error_event)}\n\n"
+                        # Break on serialization error to close stream
+                        break
                         
             except Exception as e:
                 logger.error(f"❌ Validation streaming error: {str(e)}")
-                job_manager.update_batch_validation_status(batch_id, "failed")
+                try:
+                    job_manager.update_batch_validation_status(batch_id, "failed")
+                except Exception:
+                    pass
                 error_event = {
                     "type": "error",
                     "message": f"Validation failed: {str(e)}"
                 }
-                yield f"data: {json.dumps(error_event)}\n\n"
+                try:
+                    yield f"data: {json.dumps(error_event)}\n\n"
+                except Exception:
+                    yield "data: {\"type\":\"error\",\"message\":\"Validation failed\"}\n\n"
         
         return StreamingResponse(
             generate(),

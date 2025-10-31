@@ -6,16 +6,26 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Checkbox } from "@/components/ui/checkbox"
 import { ValidationMode, ValidationProgress } from "@/lib/api"
-import { Zap, BarChart3, Microscope, CheckCircle2, Loader2, TrendingUp, RefreshCw } from "lucide-react"
+import { Zap, BarChart3, Microscope, CheckCircle2, Loader2, TrendingUp, RefreshCw, Globe } from "lucide-react"
 
 interface ValidationControlsProps {
-  onValidate: (mode: ValidationMode, selectedIndices?: number[]) => void
+  onValidate: (mode: ValidationMode, selectedIndices?: number[], selectedApis?: string[]) => void
   isValidating: boolean
   validationProgress?: ValidationProgress
   selectedCount?: number
   needsValidationCount?: number
 }
+
+const AVAILABLE_APIS = [
+  { value: "crossref", label: "CrossRef", description: "Academic metadata database" },
+  { value: "openalex", label: "OpenAlex", description: "Open scholarly metadata" },
+  { value: "pubmed", label: "PubMed", description: "Biomedical literature" },
+  { value: "arxiv", label: "arXiv", description: "Preprint server" },
+  { value: "semantic_scholar", label: "Semantic Scholar", description: "AI-powered research tool" },
+  { value: "doaj", label: "DOAJ", description: "Directory of Open Access Journals" }
+]
 
 export function ValidationControls({
   onValidate,
@@ -25,6 +35,7 @@ export function ValidationControls({
   needsValidationCount = 0
 }: ValidationControlsProps) {
   const [mode, setMode] = useState<ValidationMode>("standard")
+  const [selectedApis, setSelectedApis] = useState<string[]>(["crossref", "openalex"]) // Default selection
 
   const validationModes = [
     {
@@ -66,38 +77,86 @@ export function ValidationControls({
       <CardContent className="space-y-4">
         {/* Mode Selection */}
         {!isValidating && (
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Validation Mode</label>
-            <div className="grid grid-cols-1 gap-2">
-              {validationModes.map((modeOption) => {
-                const Icon = modeOption.icon
-                const isSelected = mode === modeOption.value
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Validation Mode</label>
+              <div className="grid grid-cols-1 gap-2">
+                {validationModes.map((modeOption) => {
+                  const Icon = modeOption.icon
+                  const isSelected = mode === modeOption.value
 
-                return (
-                  <button
-                    key={modeOption.value}
-                    onClick={() => setMode(modeOption.value)}
-                    className={`p-3 rounded-lg border-2 transition-all text-left ${
-                      isSelected
-                        ? "border-primary bg-primary/5"
-                        : "border-border hover:border-primary/50"
-                    }`}
-                  >
-                    <div className="flex items-start gap-3">
-                      <Icon className={`h-5 w-5 mt-0.5 ${modeOption.color}`} />
-                      <div className="flex-1">
-                        <div className="font-medium">{modeOption.label}</div>
-                        <div className="text-xs text-muted-foreground mt-0.5">
-                          {modeOption.description}
+                  return (
+                    <button
+                      key={modeOption.value}
+                      onClick={() => setMode(modeOption.value)}
+                      className={`p-3 rounded-lg border-2 transition-all text-left ${
+                        isSelected
+                          ? "border-primary bg-primary/5"
+                          : "border-border hover:border-primary/50"
+                      }`}
+                    >
+                      <div className="flex items-start gap-3">
+                        <Icon className={`h-5 w-5 mt-0.5 ${modeOption.color}`} />
+                        <div className="flex-1">
+                          <div className="font-medium">{modeOption.label}</div>
+                          <div className="text-xs text-muted-foreground mt-0.5">
+                            {modeOption.description}
+                          </div>
                         </div>
+                        {isSelected && (
+                          <CheckCircle2 className="h-5 w-5 text-primary" />
+                        )}
                       </div>
-                      {isSelected && (
-                        <CheckCircle2 className="h-5 w-5 text-primary" />
-                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+            {/* API Selection */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium flex items-center gap-2">
+                <Globe className="h-4 w-4" />
+                Select APIs to Use
+              </label>
+              <div className="text-xs text-muted-foreground mb-2">
+                Choose which APIs to call for enrichment. Leaving empty uses auto-selection.
+              </div>
+              <div className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2">
+                {AVAILABLE_APIS.map((api) => {
+                  const isChecked = selectedApis.includes(api.value)
+                  return (
+                    <div
+                      key={api.value}
+                      className="flex items-start gap-2 p-2 rounded hover:bg-muted/50 transition-colors"
+                    >
+                      <Checkbox
+                        checked={isChecked}
+                        onCheckedChange={(checked) => {
+                          if (checked) {
+                            setSelectedApis([...selectedApis, api.value])
+                          } else {
+                            setSelectedApis(selectedApis.filter(a => a !== api.value))
+                          }
+                        }}
+                        id={api.value}
+                      />
+                      <label
+                        htmlFor={api.value}
+                        className="flex-1 cursor-pointer"
+                      >
+                        <div className="font-medium text-sm">{api.label}</div>
+                        <div className="text-xs text-muted-foreground">{api.description}</div>
+                      </label>
                     </div>
-                  </button>
-                )
-              })}
+                  )
+                })}
+              </div>
+              {selectedApis.length === 0 && (
+                <div className="text-xs text-orange-600 dark:text-orange-400">
+                  No APIs selected - will use auto-selection
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -149,7 +208,7 @@ export function ValidationControls({
 
         {/* Action Button */}
         <Button
-          onClick={() => onValidate(mode)}
+          onClick={() => onValidate(mode, undefined, selectedApis.length > 0 ? selectedApis : undefined)}
           disabled={isValidating || selectedCount === 0 || (validationProgress && validationProgress.type === "complete")}
           className="w-full"
           size="lg"
@@ -203,7 +262,7 @@ export function ValidationControls({
               </div>
             )}
             <Button
-              onClick={() => onValidate(mode)}
+              onClick={() => onValidate(mode, undefined, selectedApis.length > 0 ? selectedApis : undefined)}
               variant="outline"
               size="sm"
               className="w-full"

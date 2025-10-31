@@ -258,9 +258,14 @@ export function ParsedReferencesView({
                           <div>
                             <span className="text-muted-foreground">Authors:</span>{" "}
                             <span className="font-medium">
-                              {ref.extracted_fields.full_names 
+                              {ref.extracted_fields.full_names && ref.extracted_fields.full_names.length > 0
                                 ? ref.extracted_fields.full_names.join(", ")
-                                : ref.extracted_fields.family_names.join(", ")
+                                : ref.extracted_fields.family_names && ref.extracted_fields.given_names
+                                ? ref.extracted_fields.family_names.map((family: string, i: number) => {
+                                    const given = ref.extracted_fields.given_names?.[i] || ""
+                                    return given ? `${given} ${family}` : family
+                                  }).join(", ")
+                                : ref.extracted_fields.family_names?.join(", ") || "N/A"
                               }
                             </span>
                           </div>

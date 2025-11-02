@@ -206,16 +206,6 @@ export function ResultsDashboard({ data, onNewFile, onViewReferences }: ResultsD
               </CardContent>
             </Card>
 
-            <Card className="bg-gradient-to-br from-yellow-500/5 to-yellow-500/10 border-yellow-500/20">
-              <CardContent className="p-4 text-center">
-                <div className="space-y-2">
-                  <AlertTriangle className="h-6 w-6 text-yellow-500 mx-auto" />
-                  <div className="text-2xl font-bold text-yellow-500">{stats.missingFields}</div>
-                  <div className="text-xs text-muted-foreground">Missing Fields</div>
-                </div>
-              </CardContent>
-            </Card>
-
             <Card className="bg-gradient-to-br from-purple-500/5 to-purple-500/10 border-purple-500/20">
               <CardContent className="p-4 text-center">
                 <div className="space-y-2">

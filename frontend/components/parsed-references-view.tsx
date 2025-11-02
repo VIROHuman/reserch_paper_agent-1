@@ -102,10 +102,6 @@ export function ParsedReferencesView({
               <div className="text-2xl font-bold text-yellow-600">{summary.needs_validation}</div>
               <div className="text-sm text-muted-foreground">Need Validation</div>
             </div>
-            <div className="text-center">
-              <div className="text-2xl font-bold text-purple-600">{summary.total_missing_fields}</div>
-              <div className="text-sm text-muted-foreground">Missing Fields</div>
-            </div>
           </div>
 
           {/* Selection Controls */}
@@ -224,11 +220,6 @@ export function ParsedReferencesView({
                             ✓ DOI
                           </Badge>
                         )}
-                        {ref.missing_fields && ref.missing_fields.length > 0 && (
-                          <Badge variant="outline" className="font-normal text-orange-600">
-                            ⚠ {ref.missing_fields.length} missing
-                          </Badge>
-                        )}
                       </div>
                     )}
 
@@ -302,22 +293,6 @@ export function ParsedReferencesView({
                         )}
                       </div>
                     </div>
-
-                    {/* Missing Fields */}
-                    {ref.missing_fields && ref.missing_fields.length > 0 && (
-                      <div>
-                        <h4 className="text-sm font-medium mb-2 text-orange-600">
-                          Missing Fields ({ref.missing_fields.length})
-                        </h4>
-                        <div className="flex flex-wrap gap-1">
-                          {ref.missing_fields.map((field) => (
-                            <Badge key={field} variant="outline" className="text-orange-600">
-                              {field}
-                            </Badge>
-                          ))}
-                        </div>
-                      </div>
-                    )}
 
                     {/* Original Text */}
                     <div>

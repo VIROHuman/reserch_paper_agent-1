@@ -431,29 +431,9 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                             )}
                           </div>
                         </div>
-                        <div className="flex justify-between">
-                          <span className="text-xs text-muted-foreground">Abstract:</span>
-                          <span className="text-xs font-medium">
-                            {reference.extractedFields?.abstract ? "Available" : "N/A"}
-                          </span>
-                        </div>
                       </div>
                     </div>
                   </div>
-
-                  {/* Missing Fields */}
-                  {reference.missingFields?.length > 0 && (
-                    <div className="space-y-2">
-                      <h4 className="text-sm font-medium text-yellow-600">Missing Fields</h4>
-                      <div className="flex flex-wrap gap-1">
-                        {reference.missingFields.map((field) => (
-                          <Badge key={field} variant="outline" className="text-xs border-yellow-500/20 text-yellow-600">
-                            {field}
-                          </Badge>
-                        ))}
-                      </div>
-                    </div>
-                  )}
 
                   {/* Parser Information */}
                   {reference.parserUsed && (

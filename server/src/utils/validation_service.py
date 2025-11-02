@@ -112,8 +112,7 @@ class ValidationService:
                         "doi": parsed_ref.get("doi"),
                         "pages": parsed_ref.get("pages"),
                         "publisher": parsed_ref.get("publisher"),
-                        "url": parsed_ref.get("url"),
-                        "abstract": parsed_ref.get("abstract")
+                        "url": parsed_ref.get("url")
                     },
                     "quality_metrics": {
                         "quality_improvement": parsed_ref.get("quality_improvement", 0),
@@ -537,7 +536,7 @@ IMPORTANT:
         # Fields to check for changes
         fields_to_check = [
             "title", "year", "journal", "doi", "pages", 
-            "publisher", "url", "abstract", "volume", "issue"
+            "publisher", "url", "volume", "issue"
         ]
         
         for field in fields_to_check:

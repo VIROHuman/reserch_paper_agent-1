@@ -16,8 +16,10 @@ export function ValidationChangesView({ changes, referenceIndex }: ValidationCha
     return null
   }
 
-  // Filter out unchanged fields for cleaner display
-  const meaningfulChanges = changes.filter(c => c.type !== "unchanged")
+  // Filter out unchanged fields and abstract for cleaner display
+  const meaningfulChanges = changes.filter(c => 
+    c.type !== "unchanged" && c.field !== "abstract"
+  )
 
   if (meaningfulChanges.length === 0) {
     return (

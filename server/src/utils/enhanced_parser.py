@@ -219,10 +219,6 @@ class EnhancedReferenceParser:
             if not parsed_ref.get("pages"):
                 parsed_ref["pages"] = self._extract_pages_enhanced(ref_text)
             
-            # Try to extract abstract if missing
-            if not parsed_ref.get("abstract"):
-                parsed_ref["abstract"] = self._extract_abstract_enhanced(ref_text)
-            
             return parsed_ref
             
         except Exception as e:
@@ -880,36 +876,6 @@ class EnhancedReferenceParser:
         
         return None
     
-    def _extract_abstract_enhanced(self, text: str) -> Optional[str]:
-        """Enhanced abstract extraction"""
-        import re
-        
-        # Strategy 1: Look for abstract indicators
-        abstract_patterns = [
-            r'Abstract[:\s]+([^.]+(?:\.[^.]*){2,})',  # "Abstract: This is the abstract..."
-            r'Summary[:\s]+([^.]+(?:\.[^.]*){2,})',   # "Summary: This is the summary..."
-            r'Description[:\s]+([^.]+(?:\.[^.]*){2,})', # "Description: This is the description..."
-        ]
-        
-        for pattern in abstract_patterns:
-            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
-            if match:
-                abstract = match.group(1).strip()
-                if len(abstract) > 50:  # Abstract should be reasonably long
-                    return abstract
-        
-        # Strategy 2: Look for long descriptive text that might be an abstract
-        # This is more heuristic and should be used carefully
-        sentences = re.split(r'[.!?]', text)
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if (len(sentence) > 100 and 
-                not sentence.lower().startswith(('doi:', 'url:', 'http', 'www', 'vol', 'pp', 'p.', 'no', 'issue')) and
-                not re.match(r'^[A-Z][a-z]+,\s*[A-Z]', sentence)):  # Not author names
-                return sentence
-        
-        return None
-    
     def _extract_publisher(self, text: str) -> Optional[str]:
         """Extract publisher information"""
         import re
@@ -1277,7 +1243,7 @@ class EnhancedReferenceParser:
                 missing_fields.append(field)
         
         # Optional fields that would be nice to have
-        optional_fields = ["abstract", "url"]
+        optional_fields = ["url"]
         for field in optional_fields:
             if not parsed_ref.get(field) or (isinstance(parsed_ref.get(field), str) and parsed_ref.get(field).strip() == ""):
                 missing_fields.append(field)

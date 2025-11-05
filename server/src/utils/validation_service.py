@@ -93,8 +93,11 @@ class ValidationService:
                 # Track changes from validation
                 changes_made = self._track_changes(reference, parsed_ref)
                 
-                # Build full names
-                full_names = self._build_full_names(parsed_ref)
+                # Prioritize full_names from API if available (preserves complete names with middle names)
+                # Otherwise build from family_names + given_names
+                full_names = parsed_ref.get("full_names", [])
+                if not full_names or len(full_names) == 0:
+                    full_names = self._build_full_names(parsed_ref)
                 
                 result = {
                     "index": index,

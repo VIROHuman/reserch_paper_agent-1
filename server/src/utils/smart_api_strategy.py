@@ -212,10 +212,14 @@ class SmartAPIStrategy:
                 logger.debug("No API results to merge, returning parsed reference as-is")
             
             # Always ensure full_names are built before returning
+            # Prioritize existing full_names from API (preserves complete names with middle names)
             if "family_names" in enriched_ref and enriched_ref.get("family_names"):
-                if "full_names" not in enriched_ref or not enriched_ref.get("full_names"):
+                existing_full_names = enriched_ref.get("full_names", [])
+                family_names = enriched_ref.get("family_names", [])
+                
+                # Only build if full_names don't exist or count doesn't match
+                if not existing_full_names or len(existing_full_names) != len(family_names):
                     full_names = []
-                    family_names = enriched_ref.get("family_names", [])
                     given_names = enriched_ref.get("given_names", [])
                     for i, family in enumerate(family_names):
                         if i < len(given_names) and given_names[i]:
@@ -224,6 +228,8 @@ class SmartAPIStrategy:
                             full_names.append(family)
                     enriched_ref["full_names"] = full_names
                     logger.info(f"📝 Ensured full_names built: {full_names}")
+                else:
+                    logger.info(f"📝 Preserved existing full_names: {existing_full_names}")
             
             # Calculate final quality
             try:
@@ -545,17 +551,25 @@ class SmartAPIStrategy:
                 logger.info(f"Applied adjudicated {field}: {value}")
         
         # Always rebuild full_names after adjudication (in case authors were updated)
+        # Only rebuild if full_names don't already exist or don't match the count
         if "family_names" in enriched_ref and enriched_ref.get("family_names"):
-            full_names = []
+            existing_full_names = enriched_ref.get("full_names", [])
             family_names = enriched_ref.get("family_names", [])
-            given_names = enriched_ref.get("given_names", [])
-            for i, family in enumerate(family_names):
-                if i < len(given_names) and given_names[i]:
-                    full_names.append(f"{given_names[i]} {family}")
-                else:
-                    full_names.append(family)
-            enriched_ref["full_names"] = full_names
-            logger.info(f"📝 Built full_names after adjudication: {full_names}")
+            
+            # If full_names already exist and match count, keep them (they preserve complete names)
+            if existing_full_names and len(existing_full_names) == len(family_names):
+                logger.info(f"📝 Preserved existing full_names after adjudication: {existing_full_names}")
+            else:
+                # Build from family_names + given_names
+                full_names = []
+                given_names = enriched_ref.get("given_names", [])
+                for i, family in enumerate(family_names):
+                    if i < len(given_names) and given_names[i]:
+                        full_names.append(f"{given_names[i]} {family}")
+                    else:
+                        full_names.append(family)
+                enriched_ref["full_names"] = full_names
+                logger.info(f"📝 Built full_names after adjudication: {full_names}")
         
         # Store conflict information
         if conflicts:
@@ -1353,6 +1367,7 @@ class SmartAPIStrategy:
         result = {
             "family_names": [],
             "given_names": [],
+            "full_names": [],  # Store complete full names from API
             "year": None,
             "title": None,
             "journal": None,
@@ -1363,17 +1378,26 @@ class SmartAPIStrategy:
             "abstract": None
         }
         
-        # Extract authors
+        # Extract authors - preserve full_name when available
         if hasattr(api_result, 'authors') and api_result.authors:
             for author in api_result.authors:
-                if hasattr(author, 'surname') and hasattr(author, 'first_name'):
-                    result["family_names"].append(author.surname or "")
-                    result["given_names"].append(author.first_name or "")
-                elif hasattr(author, 'full_name') and author.full_name:
+                # Prioritize full_name to preserve complete names (including middle names)
+                if hasattr(author, 'full_name') and author.full_name:
+                    result["full_names"].append(author.full_name)
+                    # Still extract surname and first_name for XML generation
                     name_parts = author.full_name.split()
                     if len(name_parts) >= 2:
                         result["family_names"].append(name_parts[-1])
-                        result["given_names"].append(name_parts[0])
+                        # Preserve all given names (first name + middle names)
+                        result["given_names"].append(" ".join(name_parts[:-1]))
+                elif hasattr(author, 'surname') and hasattr(author, 'first_name'):
+                    # Build full_name from surname and first_name
+                    surname = author.surname or ""
+                    first_name = author.first_name or ""
+                    if surname and first_name:
+                        result["full_names"].append(f"{first_name} {surname}")
+                    result["family_names"].append(surname)
+                    result["given_names"].append(first_name)
         
         # Extract other fields
         for field in ["title", "year", "journal", "doi", "pages", "publisher", "url", "abstract"]:
@@ -1424,6 +1448,7 @@ class SmartAPIStrategy:
             # Handle authors specially - always update if API has more/better authors
             api_family_names = api_result.data.get("family_names", [])
             api_given_names = api_result.data.get("given_names", [])
+            api_full_names = api_result.data.get("full_names", [])
             
             if api_family_names:
                 original_family = merged.get("family_names", [])
@@ -1431,11 +1456,17 @@ class SmartAPIStrategy:
                 if not original_family:
                     merged["family_names"] = api_family_names
                     merged["given_names"] = api_given_names
+                    # Prioritize full_names from API if available
+                    if api_full_names:
+                        merged["full_names"] = api_full_names
                     merged_fields.append("authors")
                     logger.info(f"✅ Added missing authors: {api_family_names}")
                 elif len(api_family_names) > len(original_family):
                     merged["family_names"] = api_family_names
                     merged["given_names"] = api_given_names
+                    # Prioritize full_names from API if available
+                    if api_full_names:
+                        merged["full_names"] = api_full_names
                     merged_fields.append("authors")
                     logger.info(f"✨ Corrected authors: {len(original_family)} → {len(api_family_names)} authors")
             
@@ -1491,6 +1522,7 @@ class SmartAPIStrategy:
         # Handle authors specially - enhanced logic
         api_family_names = api_result.data.get("family_names", [])
         api_given_names = api_result.data.get("given_names", [])
+        api_full_names = api_result.data.get("full_names", [])
         
         if api_family_names:
             original_family = merged.get("family_names", [])
@@ -1500,6 +1532,9 @@ class SmartAPIStrategy:
                 # No original authors - add all API authors
                 merged["family_names"] = api_family_names
                 merged["given_names"] = api_given_names
+                # Prioritize full_names from API if available
+                if api_full_names:
+                    merged["full_names"] = api_full_names
                 merged_fields.append("authors")
                 logger.info(f"Added authors: {api_family_names}")
             else:
@@ -1513,30 +1548,44 @@ class SmartAPIStrategy:
                 if api_analysis["quality_score"] > original_analysis["quality_score"]:
                     merged["family_names"] = api_family_names
                     merged["given_names"] = api_given_names
+                    # Prioritize full_names from API if available
+                    if api_full_names:
+                        merged["full_names"] = api_full_names
                     merged_fields.append("authors")
                     logger.info(f" Improved authors: {original_family} → {api_family_names}")
                 elif len(api_family_names) > len(original_family):
                     # API has more authors
                     merged["family_names"] = api_family_names
                     merged["given_names"] = api_given_names
+                    # Prioritize full_names from API if available
+                    if api_full_names:
+                        merged["full_names"] = api_full_names
                     merged_fields.append("authors")
                     logger.info(f"Added more authors: {len(original_family)} → {len(api_family_names)}")
                 else:
                     logger.info(f"Kept original authors: {original_family}")
         
         # Always rebuild full_names after any author changes
+        # Prioritize API full_names, otherwise build from family_names + given_names
         if "family_names" in merged and merged.get("family_names"):
-            full_names = []
-            family_names = merged.get("family_names", [])
-            given_names = merged.get("given_names", [])
-            for i, family in enumerate(family_names):
-                if i < len(given_names) and given_names[i]:
-                    full_names.append(f"{given_names[i]} {family}")
-                else:
-                    full_names.append(family)
-            merged["full_names"] = full_names
-            if "authors" in merged_fields:
-                logger.info(f"📝 Rebuilt full_names: {full_names}")
+            # If API provided full_names, use them (they preserve complete names with middle names)
+            if api_full_names and len(api_full_names) == len(merged.get("family_names", [])):
+                merged["full_names"] = api_full_names
+                if "authors" in merged_fields:
+                    logger.info(f"📝 Using API full_names: {api_full_names}")
+            else:
+                # Build from family_names + given_names
+                full_names = []
+                family_names = merged.get("family_names", [])
+                given_names = merged.get("given_names", [])
+                for i, family in enumerate(family_names):
+                    if i < len(given_names) and given_names[i]:
+                        full_names.append(f"{given_names[i]} {family}")
+                    else:
+                        full_names.append(family)
+                merged["full_names"] = full_names
+                if "authors" in merged_fields:
+                    logger.info(f"📝 Rebuilt full_names: {full_names}")
         
         logger.info(f"Merged {len(merged_fields)} fields: {merged_fields}")
         return merged

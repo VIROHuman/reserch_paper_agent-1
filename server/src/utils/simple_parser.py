@@ -5,6 +5,7 @@ import re
 from typing import List, Dict, Any, Optional
 from loguru import logger
 from .text_normalizer import text_normalizer
+from .reference_tagging import generate_tagged_output as shared_generate_tagged_output
 
 
 class SimpleReferenceParser:
@@ -332,114 +333,11 @@ class SimpleReferenceParser:
         return missing
     
     def generate_tagged_output(self, parsed_ref: Dict[str, Any], index: int) -> str:
-        """Generate XML-like tagged output matching the target format exactly"""
-        ref_id = f"ref{index + 1}"
-        
-        # Generate authors section with proper formatting
-        authors_xml = "<authors>"
-        family_names = parsed_ref.get("family_names", [])
-        given_names = parsed_ref.get("given_names", [])
-        
-        for i, (family, given) in enumerate(zip(family_names, given_names)):
-            if family and given:
-                # Clean and format names properly
-                clean_family = family.strip()
-                clean_given = given.strip().replace('.', '')  # Remove periods from initials
-                authors_xml += f'<author><fnm>{clean_given}</fnm><surname>{clean_family}</surname></author>'
-        authors_xml += "</authors>"
-        
-        # Generate title section
-        title_xml = ""
-        if parsed_ref.get("title"):
-            clean_title = parsed_ref["title"].strip()
-            title_xml = f'<title><maintitle>{clean_title}</maintitle></title>'
-        
-        # Generate host/issue/series structure for journal information
-        host_xml = ""
-        if parsed_ref.get("journal"):
-            journal_name = parsed_ref["journal"].strip()
-            
-            # Check if we have volume and issue information
-            volume_xml = ""
-            issue_xml = ""
-            date_xml = ""
-            
-            if parsed_ref.get("year"):
-                date_xml = f'<date>{parsed_ref["year"]}</date>'
-            
-            # Try to extract volume and issue from journal field
-            volume_info = self._extract_volume_issue_info(parsed_ref)
-            if volume_info.get("volume"):
-                volume_xml = f'<volume>{volume_info["volume"]}</volume>'
-            if volume_info.get("issue"):
-                issue_xml = f'<issue>{volume_info["issue"]}</issue>'
-            
-            # Build the nested structure: host > issue > series
-            series_content = f'<title><maintitle>{journal_name}</maintitle></title>'
-            if volume_xml:
-                series_content += volume_xml
-            if issue_xml:
-                series_content += issue_xml
-            
-            issue_content = f'<series>{series_content}</series>'
-            if date_xml:
-                issue_content += date_xml
-                
-            host_xml = f'<host><issue>{issue_content}</issue></host>'
-        
-        # Generate pages section with proper formatting
-        pages_xml = ""
-        if parsed_ref.get("pages"):
-            pages = parsed_ref["pages"].strip()
-            if '-' in pages or '–' in pages:
-                import re
-                page_parts = re.split(r'[-–]', pages)
-                if len(page_parts) == 2:
-                    pages_xml = f'<pages><fpage>{page_parts[0].strip()}</fpage><lpage>{page_parts[1].strip()}</lpage></pages>'
-                else:
-                    pages_xml = f'<pages>{pages}</pages>'
-            else:
-                pages_xml = f'<pages><fpage>{pages}</fpage></pages>'
-        
-        # Generate comment section for additional information
-        comments = []
-        if parsed_ref.get("doi"):
-            comments.append(f'DOI: {parsed_ref["doi"]}')
-        if parsed_ref.get("publisher"):
-            comments.append(f'Publisher: {parsed_ref["publisher"]}')
-        if parsed_ref.get("url"):
-            comments.append(f'URL: {parsed_ref["url"]}')
-        if parsed_ref.get("abstract"):
-            abstract_text = parsed_ref["abstract"][:200] + "..." if len(parsed_ref["abstract"]) > 200 else parsed_ref["abstract"]
-            comments.append(f'Abstract: {abstract_text}')
-        
-        comment_xml = ""
-        for comment in comments:
-            comment_xml += f'<comment>{comment}</comment>'
-        
-        # Generate label in the exact format: "FirstAuthor, Year" or "FirstAuthor et al., Year"
-        label = ""
-        if family_names:
-            first_author = family_names[0]
-            year = parsed_ref.get("year", "n.d.")
-            
-            if len(family_names) == 1:
-                label = f"{first_author}, {year}"
-            else:
-                label = f"{first_author} et al., {year}"
-        
-        # Assemble the final XML structure
-        tagged_output = f'<reference id="{ref_id}">'
-        if label:
-            tagged_output += f'<label>{label}</label>'
-        tagged_output += authors_xml
-        tagged_output += title_xml
-        tagged_output += host_xml
-        tagged_output += pages_xml
-        tagged_output += comment_xml
-        tagged_output += '</reference>'
-        
-        return tagged_output
+        """
+        Generate XML tagged output matching the bibitem format.
+        Uses shared tagging utility to ensure consistency across all parsers.
+        """
+        return shared_generate_tagged_output(parsed_ref, index)
     
     def _extract_volume_issue_info(self, parsed_ref: Dict[str, Any]) -> Dict[str, str]:
         """Extract volume and issue information from parsed reference"""

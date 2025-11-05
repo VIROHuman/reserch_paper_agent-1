@@ -11,6 +11,7 @@ from loguru import logger
 
 # Import the NER parser from the services directory
 from ..services.reference_parcer_ollama import AdvancedNERParser, Author, ReferenceData
+from .reference_tagging import generate_tagged_output as shared_generate_tagged_output
 
 
 class NERReferenceParser:
@@ -142,9 +143,6 @@ class NERReferenceParser:
         if not ner_result.get('doi'):
             missing_fields.append('doi')
         
-        # Create tagged output for display
-        tagged_output = self._generate_tagged_output(ner_result)
-        
         # Build flagging analysis
         flagging_analysis = {
             'missing_fields': missing_fields,
@@ -154,7 +152,8 @@ class NERReferenceParser:
             'data_sources_used': ['NER_MODEL']
         }
         
-        return {
+        # Build the result dict first (will be used for tagged output generation)
+        result_dict = {
             'family_names': family_names,
             'given_names': given_names,
             'year': ner_result.get('year'),
@@ -176,65 +175,16 @@ class NERReferenceParser:
             'quality_improvement': 0.0,  # No improvement from base parsing
             'final_quality_score': overall_confidence,
             'missing_fields': missing_fields,
-            'tagged_output': tagged_output,
             'flagging_analysis': flagging_analysis,
             'confidence_scores': confidence_scores,
             'entity_count': ner_result.get('entity_count', {}),
             'ambiguity_flags': ner_result.get('ambiguity_flags', [])
         }
-    
-    def _generate_tagged_output(self, ner_result: dict) -> str:
-        """
-        Generate tagged output for display purposes
-        """
-        parts = []
         
-        # Add title if present
-        if ner_result.get('title'):
-            parts.append(f"<title>{ner_result['title']}</title>")
+        # Generate tagged output using shared function (index 0 as placeholder - will be set correctly by caller)
+        result_dict['tagged_output'] = shared_generate_tagged_output(result_dict, 0)
         
-        # Add authors
-        authors = ner_result.get('authors', [])
-        if authors:
-            author_names = []
-            for author in authors:
-                if isinstance(author, dict):
-                    name = author.get('full_name') or f"{author.get('first_name', '')} {author.get('surname', '')}".strip()
-                    if name:
-                        author_names.append(name)
-                elif isinstance(author, str):
-                    author_names.append(author)
-            
-            if author_names:
-                parts.append(f"<authors>{', '.join(author_names)}</authors>")
-        
-        # Add journal
-        if ner_result.get('journal'):
-            parts.append(f"<journal>{ner_result['journal']}</journal>")
-        
-        # Add year
-        if ner_result.get('year'):
-            parts.append(f"<year>{ner_result['year']}</year>")
-        
-        # Add volume and issue
-        if ner_result.get('volume'):
-            parts.append(f"<volume>{ner_result['volume']}</volume>")
-        if ner_result.get('issue'):
-            parts.append(f"<issue>{ner_result['issue']}</issue>")
-        
-        # Add pages
-        if ner_result.get('pages'):
-            parts.append(f"<pages>{ner_result['pages']}</pages>")
-        
-        # Add DOI
-        if ner_result.get('doi'):
-            parts.append(f"<doi>{ner_result['doi']}</doi>")
-        
-        # Add URL
-        if ner_result.get('url'):
-            parts.append(f"<url>{ner_result['url']}</url>")
-        
-        return " | ".join(parts) if parts else "No structured data extracted"
+        return result_dict
     
     def _regex_based_parsing(self, raw_citation: str) -> dict:
         """
@@ -320,7 +270,7 @@ class NERReferenceParser:
         """
         logger.warning(f"Creating fallback result for failed parsing: {error}")
         
-        return {
+        fallback_dict = {
             'index': index,
             'family_names': [],
             'given_names': [],
@@ -343,7 +293,6 @@ class NERReferenceParser:
             'quality_improvement': 0.0,
             'final_quality_score': 0.0,
             'missing_fields': ['title', 'authors', 'year', 'journal', 'doi'],
-            'tagged_output': f"<error>Parsing failed: {error}</error>",
             'flagging_analysis': {
                 'missing_fields': ['title', 'authors', 'year', 'journal', 'doi'],
                 'replaced_fields': [],
@@ -356,6 +305,11 @@ class NERReferenceParser:
             'ambiguity_flags': ['parsing_failed'],
             'error': error
         }
+        
+        # Generate tagged output using shared function for consistency
+        fallback_dict['tagged_output'] = shared_generate_tagged_output(fallback_dict, index)
+        
+        return fallback_dict
     
     def get_parser_info(self) -> dict:
         """

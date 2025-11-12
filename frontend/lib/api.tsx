@@ -1,5 +1,6 @@
 // API client for Research Paper Reference Agent
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "/api"
+// Using direct backend URL to bypass Next.js proxy timeout issues
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
 export interface ApiResponse<T> {
   success: boolean

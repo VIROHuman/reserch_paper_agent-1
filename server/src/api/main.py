@@ -258,11 +258,13 @@ async def upload_pdf(
                                 "year": parsed_ref.get("year"),
                                 "title": parsed_ref.get("title"),
                                 "journal": parsed_ref.get("journal"),
+                                "volume": parsed_ref.get("volume"),
                                 "doi": parsed_ref.get("doi"),
                                 "pages": parsed_ref.get("pages"),
                                 "publisher": parsed_ref.get("publisher"),
                                 "url": parsed_ref.get("url"),
-                                "abstract": parsed_ref.get("abstract")
+                                "abstract": parsed_ref.get("abstract"),
+                                "issue_month": parsed_ref.get("issue_month")
                             },
                             "quality_metrics": {
                                 "quality_improvement": parsed_ref.get("quality_improvement", 0),
@@ -447,11 +449,13 @@ async def process_file_with_progress(
                         "year": parsed_ref.get("year"),
                         "title": parsed_ref.get("title"),
                         "journal": parsed_ref.get("journal"),
+                        "volume": parsed_ref.get("volume"),
                         "doi": parsed_ref.get("doi"),
                         "pages": parsed_ref.get("pages"),
                         "publisher": parsed_ref.get("publisher"),
                         "url": parsed_ref.get("url"),
-                        "abstract": parsed_ref.get("abstract")
+                        "abstract": parsed_ref.get("abstract"),
+                        "issue_month": parsed_ref.get("issue_month")
                     },
                     "quality_metrics": {
                         "quality_improvement": parsed_ref.get("quality_improvement", 0),
@@ -717,11 +721,13 @@ async def process_file_async(
                             "year": parsed_ref.get("year"),
                             "title": parsed_ref.get("title"),
                             "journal": parsed_ref.get("journal"),
+                            "volume": parsed_ref.get("volume"),
                             "doi": parsed_ref.get("doi"),
                             "pages": parsed_ref.get("pages"),
                             "publisher": parsed_ref.get("publisher"),
                             "url": parsed_ref.get("url"),
-                            "abstract": parsed_ref.get("abstract")
+                            "abstract": parsed_ref.get("abstract"),
+                            "issue_month": parsed_ref.get("issue_month")
                         },
                         "quality_metrics": {
                             "quality_improvement": parsed_ref.get("quality_improvement", 0),
@@ -1105,10 +1111,13 @@ async def parse_references_only(
                             "year": parsed_ref.get("year"),
                             "title": parsed_ref.get("title"),
                             "journal": parsed_ref.get("journal"),
+                            "volume": parsed_ref.get("volume"),
                             "doi": parsed_ref.get("doi"),
                             "pages": parsed_ref.get("pages"),
                             "publisher": parsed_ref.get("publisher"),
-                            "url": parsed_ref.get("url")
+                            "url": parsed_ref.get("url"),
+                            "abstract": parsed_ref.get("abstract"),
+                            "issue_month": parsed_ref.get("issue_month")
                         },
                         "quality_metrics": {
                             "initial_quality_score": parsed_ref.get("initial_quality_score", 0)

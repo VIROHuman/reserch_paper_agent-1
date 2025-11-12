@@ -108,21 +108,44 @@ class CrossRefClient:
                     authors = []
                     if "author" in item:
                         for author in item["author"]:
+                            given = author.get("given", "")
+                            family = author.get("family", "")
+                            # Debug: Log what CrossRef is returning
+                            logger.debug(f"CrossRef Author - given='{given}', family='{family}'")
                             authors.append(Author(
-                                first_name=author.get("given"),
-                                surname=author.get("family"),
-                                full_name=f"{author.get('given', '')} {author.get('family', '')}".strip()
+                                first_name=given,
+                                surname=family,
+                                full_name=f"{given} {family}".strip()
                             ))
+                    
+                    # Extract publication year and month
+                    year = None
+                    issue_month = None
+                    date_parts = None
+                    if item.get("published-print", {}).get("date-parts"):
+                        date_parts = item.get("published-print", {}).get("date-parts", [[None]])[0]
+                    elif item.get("published-online", {}).get("date-parts"):
+                        date_parts = item.get("published-online", {}).get("date-parts", [[None]])[0]
+                    
+                    if date_parts:
+                        year = date_parts[0] if len(date_parts) > 0 else None
+                        if len(date_parts) > 1 and date_parts[1]:
+                            # Convert month number to month name
+                            month_num = int(date_parts[1])
+                            month_names = ["January", "February", "March", "April", "May", "June",
+                                         "July", "August", "September", "October", "November", "December"]
+                            if 1 <= month_num <= 12:
+                                issue_month = month_names[month_num - 1]
                     
                     # Extract publication details
                     reference = ReferenceData(
                         title=item.get("title", [""])[0] if item.get("title") else None,
                         authors=authors,
-                        year=item.get("published-print", {}).get("date-parts", [[None]])[0][0] or 
-                             item.get("published-online", {}).get("date-parts", [[None]])[0][0],
+                        year=year,
                         journal=item.get("container-title", [""])[0] if item.get("container-title") else None,
                         volume=item.get("volume"),
                         issue=item.get("issue"),
+                        issue_month=issue_month,
                         pages=item.get("page"),
                         doi=item.get("DOI"),
                         publisher=item.get("publisher"),
@@ -199,14 +222,26 @@ class CrossRefClient:
                     if full_name:
                         authors.append(full_name)
             
-            # Extract publication year
+            # Extract publication year and month
             year = None
+            issue_month = None
+            date_parts = None
             if "published-print" in item and "date-parts" in item["published-print"]:
-                year = item["published-print"]["date-parts"][0][0]
+                date_parts = item["published-print"]["date-parts"][0]
             elif "published-online" in item and "date-parts" in item["published-online"]:
-                year = item["published-online"]["date-parts"][0][0]
+                date_parts = item["published-online"]["date-parts"][0]
             elif "published" in item and "date-parts" in item["published"]:
-                year = item["published"]["date-parts"][0][0]
+                date_parts = item["published"]["date-parts"][0]
+            
+            if date_parts:
+                year = date_parts[0] if len(date_parts) > 0 else None
+                if len(date_parts) > 1 and date_parts[1]:
+                    # Convert month number to month name
+                    month_num = int(date_parts[1])
+                    month_names = ["January", "February", "March", "April", "May", "June",
+                                 "July", "August", "September", "October", "November", "December"]
+                    if 1 <= month_num <= 12:
+                        issue_month = month_names[month_num - 1]
             
             # Extract title
             title = None
@@ -237,6 +272,7 @@ class CrossRefClient:
                 "year": year,
                 "volume": item.get("volume"),
                 "issue": item.get("issue"),
+                "issue_month": issue_month,
                 "pages": item.get("page"),
                 "abstract": abstract,
                 "url": f"https://doi.org/{item.get('DOI', '').lower()}" if item.get("DOI") else None,
@@ -267,72 +303,170 @@ class OpenAlexClient:
             logger.debug(f"{api_name}: Skipped (circuit breaker open)")
             return []
         
+        client = None
         try:
-            async with httpx.AsyncClient() as client:
-                params = {
-                    "search": query,
-                    "per_page": limit,
-                    "sort": "relevance_score:desc"
-                }
-                
-                response = await client.get(
-                    f"{self.base_url}/works",
-                    headers=self.headers,
-                    params=params,
-                    timeout=None  # No timeout
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    results = self._parse_openalex_response(data)
-                    circuit_breaker.record_success(api_name)
-                    return results
-                
+            # Create client with explicit timeout settings to prevent hangs
+            client = httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0, connect=10.0),  # 30s total, 10s connect
+                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+            )
+            
+            params = {
+                "search": query,
+                "per_page": limit,
+                "sort": "relevance_score:desc"
+            }
+            
+            response = await client.get(
+                f"{self.base_url}/works",
+                headers=self.headers,
+                params=params
+            )
+            
+            # Check status before parsing JSON
+            if response.status_code != 200:
+                logger.debug(f"{api_name}: HTTP {response.status_code}")
+                circuit_breaker.record_failure(api_name)
+                return []
+            
+            # Parse JSON with error handling
+            try:
+                data = response.json()
+            except Exception as json_error:
+                logger.warning(f"{api_name}: Failed to parse JSON response: {str(json_error)}")
+                circuit_breaker.record_failure(api_name)
+                return []
+            
+            # Parse response with error handling
+            try:
+                results = self._parse_openalex_response(data)
+                circuit_breaker.record_success(api_name)
+                return results
+            except Exception as parse_error:
+                logger.warning(f"{api_name}: Error parsing response: {str(parse_error)}")
                 circuit_breaker.record_failure(api_name)
                 return []
                 
+        except httpx.TimeoutException:
+            logger.warning(f"{api_name}: Request timed out")
+            circuit_breaker.record_failure(api_name)
+            return []
+        except httpx.RequestError as e:
+            logger.debug(f"{api_name}: Request error - {str(e)}")
+            circuit_breaker.record_failure(api_name)
+            return []
         except Exception as e:
             logger.debug(f"{api_name}: Error - {str(e)}")
             circuit_breaker.record_failure(api_name)
             return []
+        finally:
+            # Ensure client is properly closed
+            if client:
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
     
     def _parse_openalex_response(self, data: Dict[str, Any]) -> List[ReferenceData]:
         """Parse OpenAlex API response"""
         references = []
         
-        if "results" in data:
-            for item in data["results"]:
-                try:
-                    # Extract authors
-                    authors = []
-                    if "authorships" in item:
-                        for authorship in item["authorships"]:
-                            author = authorship.get("author", {})
-                            authors.append(Author(
-                                first_name=author.get("display_name", "").split()[0] if author.get("display_name") else None,
-                                surname=" ".join(author.get("display_name", "").split()[1:]) if author.get("display_name") else None,
-                                full_name=author.get("display_name")
-                            ))
-
-                    abstract_text = None
-                    if item.get("abstract_inverted_index"):
-                        abstract_text = self._convert_abstract_index_to_text(item["abstract_inverted_index"])
-                    
-                    reference = ReferenceData(
-                        title=item.get("title"),
-                        authors=authors,
-                        year=item.get("publication_year"),
-                        journal=item.get("primary_location", {}).get("source", {}).get("display_name"),
-                        doi=item.get("doi"),
-                        url=item.get("id"),
-                        abstract=abstract_text,
-                        publication_type=item.get("type", "journal-article")
-                    )
-                    references.append(reference)
-                    
-                except Exception as e:
-                    logger.warning(f"Error parsing OpenAlex item: {str(e)}")
+        if not isinstance(data, dict):
+            logger.warning("OpenAlex: Invalid response format")
+            return references
+        
+        if "results" not in data:
+            logger.debug("OpenAlex: No results in response")
+            return references
+        
+        results = data.get("results", [])
+        if not isinstance(results, list):
+            logger.warning("OpenAlex: Results is not a list")
+            return references
+        
+        # Limit processing to prevent hangs on very large result sets
+        max_items = 50
+        if len(results) > max_items:
+            logger.debug(f"OpenAlex: Too many results ({len(results)}), processing first {max_items}")
+            results = results[:max_items]
+        
+        for item in results:
+            try:
+                if not isinstance(item, dict):
                     continue
+                
+                # Extract authors with error handling
+                authors = []
+                if "authorships" in item and isinstance(item["authorships"], list):
+                    # Limit authors to prevent processing issues
+                    authorships = item["authorships"][:20]  # Max 20 authors per paper
+                    for authorship in authorships:
+                        try:
+                            if not isinstance(authorship, dict):
+                                continue
+                            author = authorship.get("author", {})
+                            if not isinstance(author, dict):
+                                continue
+                            
+                            display_name = author.get("display_name", "")
+                            if display_name and isinstance(display_name, str):
+                                name_parts = display_name.split()
+                                if len(name_parts) >= 2:
+                                    # Last word is surname, everything else is first_name (including middle names)
+                                    first_name = " ".join(name_parts[:-1])
+                                    surname = name_parts[-1]
+                                else:
+                                    first_name = None
+                                    surname = display_name if name_parts else None
+                            else:
+                                first_name = None
+                                surname = None
+                            
+                            authors.append(Author(
+                                first_name=first_name,
+                                surname=surname,
+                                full_name=display_name
+                            ))
+                        except Exception as author_error:
+                            logger.debug(f"OpenAlex: Error parsing author: {str(author_error)}")
+                            continue
+
+                # Extract abstract with error handling
+                abstract_text = None
+                try:
+                    abstract_index = item.get("abstract_inverted_index")
+                    if abstract_index and isinstance(abstract_index, dict):
+                        abstract_text = self._convert_abstract_index_to_text(abstract_index)
+                except Exception as abstract_error:
+                    logger.debug(f"OpenAlex: Error processing abstract: {str(abstract_error)}")
+                    abstract_text = None
+                
+                # Safely extract nested fields
+                journal = None
+                try:
+                    primary_location = item.get("primary_location", {})
+                    if isinstance(primary_location, dict):
+                        source = primary_location.get("source", {})
+                        if isinstance(source, dict):
+                            journal = source.get("display_name")
+                except Exception:
+                    pass
+                
+                reference = ReferenceData(
+                    title=item.get("title"),
+                    authors=authors,
+                    year=item.get("publication_year"),
+                    journal=journal,
+                    doi=item.get("doi"),
+                    url=item.get("id"),
+                    abstract=abstract_text,
+                    publication_type=item.get("type", "journal-article")
+                )
+                references.append(reference)
+                
+            except Exception as e:
+                logger.warning(f"OpenAlex: Error parsing item: {str(e)}")
+                continue
         
         return references
     
@@ -341,14 +475,38 @@ class OpenAlexClient:
         if not abstract_index:
             return ""
         
-        word_positions = []
-        for word, positions in abstract_index.items():
-            for pos in positions:
-                word_positions.append((pos, word))
-        
-        word_positions.sort(key=lambda x: x[0])
-        
-        return " ".join([word for _, word in word_positions])
+        try:
+            # Limit processing to prevent hangs on very large abstracts
+            max_words = 10000  # Reasonable limit
+            word_count = sum(len(positions) for positions in abstract_index.values())
+            
+            if word_count > max_words:
+                logger.debug(f"OpenAlex: Abstract too large ({word_count} words), truncating")
+                # Process only first N words
+                word_positions = []
+                processed = 0
+                for word, positions in abstract_index.items():
+                    if processed >= max_words:
+                        break
+                    for pos in positions:
+                        if processed >= max_words:
+                            break
+                        word_positions.append((pos, word))
+                        processed += 1
+            else:
+                word_positions = []
+                for word, positions in abstract_index.items():
+                    for pos in positions:
+                        word_positions.append((pos, word))
+            
+            # Sort by position
+            word_positions.sort(key=lambda x: x[0])
+            
+            # Join words
+            return " ".join([word for _, word in word_positions])
+        except Exception as e:
+            logger.warning(f"OpenAlex: Error converting abstract: {str(e)}")
+            return ""
     
     async def get_doi_metadata(self, doi: str) -> Dict[str, Any]:
         try:
@@ -505,10 +663,23 @@ class SemanticScholarClient:
                     authors = []
                     if "authors" in item:
                         for author in item["authors"]:
+                            author_name = author.get("name", "")
+                            if author_name:
+                                name_parts = author_name.split()
+                                if len(name_parts) >= 2:
+                                    # Last word is surname, everything else is first_name (including middle names)
+                                    first_name = " ".join(name_parts[:-1])
+                                    surname = name_parts[-1]
+                                else:
+                                    first_name = None
+                                    surname = author_name
+                            else:
+                                first_name = None
+                                surname = None
                             authors.append(Author(
-                                first_name=author.get("name", "").split()[0] if author.get("name") else None,
-                                surname=" ".join(author.get("name", "").split()[1:]) if author.get("name") else None,
-                                full_name=author.get("name")
+                                first_name=first_name,
+                                surname=surname,
+                                full_name=author_name
                             ))
                     
                     # Extract publication details
@@ -581,13 +752,22 @@ class DOAJClient:
                     authors = []
                     if "bibjson" in item and "author" in item["bibjson"]:
                         for author in item["bibjson"]["author"]:
-                            name_parts = author.get("name", "").split()
-                            first_name = name_parts[0] if name_parts else None
-                            surname = " ".join(name_parts[1:]) if len(name_parts) > 1 else None
+                            author_name = author.get("name", "")
+                            name_parts = author_name.split() if author_name else []
+                            if len(name_parts) >= 2:
+                                # Last word is surname, everything else is first_name (including middle names)
+                                first_name = " ".join(name_parts[:-1])
+                                surname = name_parts[-1]
+                            elif len(name_parts) == 1:
+                                first_name = None
+                                surname = name_parts[0]
+                            else:
+                                first_name = None
+                                surname = None
                             authors.append(Author(
                                 first_name=first_name,
                                 surname=surname,
-                                full_name=author.get("name")
+                                full_name=author_name
                             ))
                     
                     # Extract publication details
@@ -687,11 +867,15 @@ class ArxivClient:
                             full_name = name_elem.text.strip()
                             name_parts = full_name.split()
                             if len(name_parts) >= 2:
-                                first_name = name_parts[0]
-                                surname = " ".join(name_parts[1:])
+                                # Last word is surname, everything else is first_name (including middle names)
+                                first_name = " ".join(name_parts[:-1])
+                                surname = name_parts[-1]
+                            elif len(name_parts) == 1:
+                                first_name = None
+                                surname = name_parts[0]
                             else:
                                 first_name = None
-                                surname = full_name
+                                surname = None
                             
                             authors.append(Author(
                                 first_name=first_name,

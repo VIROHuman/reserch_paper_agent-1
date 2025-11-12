@@ -112,10 +112,13 @@ class ValidationService:
                         "year": parsed_ref.get("year"),
                         "title": parsed_ref.get("title"),
                         "journal": parsed_ref.get("journal"),
+                        "volume": parsed_ref.get("volume"),
                         "doi": parsed_ref.get("doi"),
                         "pages": parsed_ref.get("pages"),
                         "publisher": parsed_ref.get("publisher"),
-                        "url": parsed_ref.get("url")
+                        "url": parsed_ref.get("url"),
+                        "abstract": parsed_ref.get("abstract"),
+                        "issue_month": parsed_ref.get("issue_month")
                     },
                     "quality_metrics": {
                         "quality_improvement": parsed_ref.get("quality_improvement", 0),

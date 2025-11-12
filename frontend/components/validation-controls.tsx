@@ -74,7 +74,7 @@ export function ValidationControls({
           Choose validation mode and enrich references with API data
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-4 max-h-[calc(100vh-200px)] overflow-y-auto pr-2">
         {/* Mode Selection */}
         {!isValidating && (
           <div className="space-y-4">

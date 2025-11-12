@@ -3,7 +3,10 @@ Shared utility module for generating consistent XML tagged output for all refere
 This ensures all parsers produce the same standardized bibitem format.
 """
 import re
+import logging
 from typing import Dict, Any, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def extract_volume_issue_info(parsed_ref: Dict[str, Any]) -> Dict[str, str]:
@@ -75,20 +78,34 @@ def normalize_parsed_reference(parsed_ref: Dict[str, Any]) -> Dict[str, Any]:
     }
     
     # Handle family_names - can be list or single value
+    # CRITICAL: Preserve all entries to maintain alignment with given_names
+    # Filter empty values but maintain index alignment
     family_names = parsed_ref.get("family_names", [])
     if isinstance(family_names, str):
         family_names = [family_names] if family_names else []
     elif not isinstance(family_names, list):
         family_names = []
-    normalized["family_names"] = [str(f).strip() for f in family_names if f]
+    # Keep all entries, even empty ones, to maintain alignment with given_names
+    # Empty strings will be filtered out in tagging code when creating valid_authors
+    normalized["family_names"] = [str(f).strip() if f else "" for f in family_names]
     
     # Handle given_names - can be list or single value
+    # IMPORTANT: Keep empty strings to maintain alignment with family_names
+    # Empty strings will be handled in tagging code (skipped if empty)
     given_names = parsed_ref.get("given_names", [])
     if isinstance(given_names, str):
         given_names = [given_names] if given_names else []
     elif not isinstance(given_names, list):
         given_names = []
-    normalized["given_names"] = [str(g).strip() for g in given_names if g]
+    # Don't filter out empty strings - keep them to maintain list alignment
+    normalized["given_names"] = [str(g).strip() if g else "" for g in given_names]
+    
+    # Ensure both lists have the same length for proper alignment
+    max_len = max(len(normalized["family_names"]), len(normalized["given_names"]))
+    while len(normalized["family_names"]) < max_len:
+        normalized["family_names"].append("")
+    while len(normalized["given_names"]) < max_len:
+        normalized["given_names"].append("")
     
     # Handle full_names - prioritize from API, or build from family + given
     full_names = parsed_ref.get("full_names", [])
@@ -144,18 +161,26 @@ def normalize_parsed_reference(parsed_ref: Dict[str, Any]) -> Dict[str, Any]:
         except (ValueError, TypeError):
             normalized["year"] = None
     
-    normalized["title"] = str(parsed_ref.get("title", "")).strip()
-    normalized["journal"] = str(parsed_ref.get("journal", "")).strip()
-    normalized["pages"] = str(parsed_ref.get("pages", "")).strip()
-    normalized["doi"] = str(parsed_ref.get("doi", "")).strip()
-    normalized["url"] = str(parsed_ref.get("url", "")).strip()
-    normalized["publisher"] = str(parsed_ref.get("publisher", "")).strip()
-    normalized["abstract"] = str(parsed_ref.get("abstract", "")).strip()
+    # Handle scalar string fields - ensure None becomes empty string, not "None"
+    normalized["title"] = str(parsed_ref.get("title") or "").strip()
+    normalized["journal"] = str(parsed_ref.get("journal") or "").strip()
+    normalized["pages"] = str(parsed_ref.get("pages") or "").strip()
+    normalized["doi"] = str(parsed_ref.get("doi") or "").strip()
+    normalized["url"] = str(parsed_ref.get("url") or "").strip()
+    normalized["publisher"] = str(parsed_ref.get("publisher") or "").strip()
+    normalized["abstract"] = str(parsed_ref.get("abstract") or "").strip()
     
     # Handle volume/issue - may be in separate fields or embedded in journal
     volume_info = extract_volume_issue_info(parsed_ref)
     normalized["volume"] = volume_info.get("volume", "")
     normalized["issue"] = volume_info.get("issue", "")
+    
+    # Handle issue_month
+    issue_month = parsed_ref.get("issue_month")
+    if issue_month:
+        normalized["issue_month"] = str(issue_month).strip()
+    else:
+        normalized["issue_month"] = ""
     
     return normalized
 
@@ -181,9 +206,9 @@ def generate_tagged_output(parsed_ref: Dict[str, Any], index: int) -> str:
     
     # Generate label text: "FirstAuthor, Year" or "FirstAuthor et al., Year"
     label_text = ""
+    year = ref.get("year") or "n.d."  # Handle None explicitly
     if family_names:
         first_author = family_names[0]
-        year = ref.get("year", "n.d.")
         
         if len(family_names) == 1:
             label_text = f"{first_author}, {year}"
@@ -191,7 +216,6 @@ def generate_tagged_output(parsed_ref: Dict[str, Any], index: int) -> str:
             label_text = f"{first_author} et al., {year}"
     else:
         # Fallback label
-        year = ref.get("year", "n.d.")
         label_text = f"Reference {index + 1}, {year}"
     
     # Start building XML with bibitem root
@@ -203,49 +227,100 @@ def generate_tagged_output(parsed_ref: Dict[str, Any], index: int) -> str:
     given_names = ref.get("given_names", [])
     family_names = ref.get("family_names", [])
     
-    # Prioritize full_names from API (preserves complete names with middle names)
-    if full_names and len(full_names) > 0:
-        author_list = full_names
-    else:
-        # Build from family_names + given_names
-        author_list = []
-        for i, family in enumerate(family_names):
-            given = given_names[i] if i < len(given_names) else ""
-            if given and family:
-                author_list.append(f"{given} {family}")
-            elif family:
-                author_list.append(family)
+    # Priority 1: Use API-provided family_names and given_names if available
+    # Use the API's classification exactly as provided - no modifications, no heuristics
+    # Whatever the API says is surname → family_names → <snm>
+    # Whatever the API says is first_name → given_names → <fnm>
+    # Only fall back to parsing full_names if family_names are not available from API
+    # Note: We use API names if family_names exist, even if given_names is incomplete (some authors may only have surnames)
+    use_api_names = family_names and len(family_names) > 0
     
-    # Generate author XML with proper formatting
-    # Handle "and" between authors based on position
-    for i, author_name in enumerate(author_list):
-        if author_name:
-            name_parts = author_name.strip().split()
-            if len(name_parts) >= 2:
-                surname = name_parts[-1].strip()
-                given_name = " ".join(name_parts[:-1]).strip()
-                # Preserve periods in initials (e.g., "A." or "E.A.S.")
-                # Format: <au><snm>...</snm><x>, </x><fnm>...</fnm></au>
-                authors_parts.append(f'<au><snm>{surname}</snm><x>, </x><fnm>{given_name}</fnm></au>')
-            elif len(name_parts) == 1:
-                # Only surname
-                authors_parts.append(f'<au><snm>{name_parts[0].strip()}</snm></au>')
+    if use_api_names:
+        # Use API-provided names directly - use exactly what the API provided
+        # The API's surname/first_name classification is used as-is for snm/fnm tags
+        # Match family_names and given_names by index
+        num_authors = max(len(family_names), len(given_names))
+        
+        # Debug: Log what we have
+        logger.debug(f"Tagging - family_names: {family_names}, given_names: {given_names}, num_authors: {num_authors}")
+        
+        # First, collect all valid authors (non-empty surnames)
+        valid_authors = []
+        for i in range(num_authors):
+            surname_raw = family_names[i] if i < len(family_names) else None
+            given_name_raw = given_names[i] if i < len(given_names) else None
             
-            # Add separator between authors
-            if i < len(author_list) - 1:
-                # Check if next-to-last author (add "and" before last)
-                if i == len(author_list) - 2:
+            surname = str(surname_raw).strip() if surname_raw is not None else ""
+            given_name = str(given_name_raw).strip() if given_name_raw is not None else ""
+            
+            # Debug: Log each author
+            logger.debug(f"Author {i}: surname='{surname}' (→ <snm>), given_name='{given_name}' (→ <fnm>)")
+            
+            if surname:
+                valid_authors.append((surname, given_name))
+        
+        # Generate XML for valid authors with proper separators
+        # Use API's classification directly: family_names → <snm>, given_names → <fnm>
+        for i, (surname, given_name) in enumerate(valid_authors):
+            # Add separator before this author if it's not the first
+            if i > 0:
+                # Add "and" before last author, comma otherwise
+                if i == len(valid_authors) - 1:
                     authors_parts.append('<x>, and </x>')
                 else:
                     authors_parts.append('<x>, </x>')
+            
+            if given_name:
+                # Both surname and given name available from API - use directly
+                authors_parts.append(f'<au><snm>{surname}</snm><x>, </x><fnm>{given_name}</fnm></au>')
+            else:
+                # Only surname available from API
+                authors_parts.append(f'<au><snm>{surname}</snm></au>')
+    else:
+        # Fallback: Parse from full_names if API names not available
+        # This handles cases where no API was called or API didn't return separate fields
+        if full_names and len(full_names) > 0:
+            author_list = full_names
+        else:
+            # Build from family_names + given_names (if only partial data available)
+            author_list = []
+            for i, family in enumerate(family_names):
+                given = given_names[i] if i < len(given_names) else ""
+                if given and family:
+                    author_list.append(f"{given} {family}")
+                elif family:
+                    author_list.append(family)
+        
+        # Generate author XML by parsing full names (fallback method)
+        for i, author_name in enumerate(author_list):
+            if author_name:
+                name_parts = author_name.strip().split()
+                if len(name_parts) >= 2:
+                    surname = name_parts[-1].strip()
+                    given_name = " ".join(name_parts[:-1]).strip()
+                    # Preserve periods in initials (e.g., "A." or "E.A.S.")
+                    # Format: <au><snm>...</snm><x>, </x><fnm>...</fnm></au>
+                    authors_parts.append(f'<au><snm>{surname}</snm><x>, </x><fnm>{given_name}</fnm></au>')
+                elif len(name_parts) == 1:
+                    # Only surname
+                    authors_parts.append(f'<au><snm>{name_parts[0].strip()}</snm></au>')
+                
+                # Add separator between authors
+                if i < len(author_list) - 1:
+                    # Check if next-to-last author (add "and" before last)
+                    if i == len(author_list) - 2:
+                        authors_parts.append('<x>, and </x>')
+                    else:
+                        authors_parts.append('<x>, </x>')
     
     authors_parts.append('</aus>')
     xml_parts.append(''.join(authors_parts))
     
     # Add date (year)
-    if ref.get("year"):
+    year = ref.get("year")
+    if year:
         xml_parts.append('<x>, </x><adate>')
-        xml_parts.append(str(ref["year"]))
+        xml_parts.append(str(year))
         xml_parts.append('</adate>')
     
     # Generate title section - use <atl> for article title, <btl> for book title
@@ -280,6 +355,13 @@ def generate_tagged_output(parsed_ref: Dict[str, Any], index: int) -> str:
             xml_parts.append('<x>(</x><iss>')
             xml_parts.append(str(volume_info["issue"]))
             xml_parts.append('</iss><x>)</x>')
+        
+        # Add issue month if available
+        issue_month = ref.get("issue_month", "")
+        if issue_month:
+            xml_parts.append('<x> </x><issue>')
+            xml_parts.append(issue_month.strip())
+            xml_parts.append('</issue>')
     
     # Generate pages section - handle both page ranges and article numbers
     pages = ref.get("pages", "")
@@ -322,15 +404,6 @@ def generate_tagged_output(parsed_ref: Dict[str, Any], index: int) -> str:
         xml_parts.append('<x>. </x><doi>')
         xml_parts.append(ref["doi"].strip())
         xml_parts.append('</doi>')
-    
-    # Add URL if available
-    if ref.get("url"):
-        url = ref["url"].strip()
-        xml_parts.append('<x> </x><url url="')
-        xml_parts.append(url)
-        xml_parts.append(f'" title="{url}">')
-        xml_parts.append(url)
-        xml_parts.append('</url>')
     
     # Close bibitem
     xml_parts.append('<x>.</x></bibitem>')

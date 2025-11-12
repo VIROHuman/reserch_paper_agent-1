@@ -42,11 +42,13 @@ export interface ExtractedFields {
   year: number
   title: string
   journal: string
+  volume?: string
   doi: string
   pages: string
   publisher: string
   url: string
   abstract: string
+  issue_month?: string
 }
 
 export interface QualityMetrics {

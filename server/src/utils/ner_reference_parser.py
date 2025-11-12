@@ -105,26 +105,64 @@ class NERReferenceParser:
         """
         Convert NER parser result to the expected API format
         """
-        # Extract authors
+        # Extract authors - prioritize full_name to preserve complete names
         authors = ner_result.get('authors', [])
         family_names = []
         given_names = []
+        full_names = []
         
         for author in authors:
             if isinstance(author, dict):
-                if author.get('surname'):
-                    family_names.append(author['surname'])
-                if author.get('first_name'):
-                    given_names.append(author['first_name'])
+                # Prioritize full_name if available
+                full_name = author.get('full_name') or ""
+                surname = author.get('surname') or ""
+                first_name = author.get('first_name') or ""
+                
+                if full_name and str(full_name).lower() != 'none' and full_name.strip():
+                    full_names.append(full_name.strip())
+                    # Extract surname and first_name from full_name for backward compatibility
+                    name_parts = full_name.strip().split()
+                    if len(name_parts) >= 2:
+                        family_names.append(name_parts[-1])
+                        given_names.append(" ".join(name_parts[:-1]))
+                    elif len(name_parts) == 1:
+                        family_names.append(name_parts[0])
+                else:
+                    # Fallback to surname/first_name if full_name not available
+                    if surname and str(surname).lower() != 'none' and surname.strip():
+                        family_names.append(surname)
+                    if first_name and str(first_name).lower() != 'none' and first_name.strip():
+                        given_names.append(first_name)
             elif isinstance(author, str):
-                # Fallback for string authors
-                family_names.append(author)
+                # String format - treat as full_name
+                full_names.append(author.strip())
+                name_parts = author.strip().split()
+                if len(name_parts) >= 2:
+                    family_names.append(name_parts[-1])
+                    given_names.append(" ".join(name_parts[:-1]))
+                elif len(name_parts) == 1:
+                    family_names.append(name_parts[0])
             elif hasattr(author, 'surname'):
-                # Handle Pydantic Author objects
-                if author.surname:
-                    family_names.append(author.surname)
-                if author.first_name:
-                    given_names.append(author.first_name)
+                # Handle Pydantic Author objects - prioritize full_name
+                full_name = getattr(author, 'full_name', None) or ""
+                surname = getattr(author, 'surname', None) or ""
+                first_name = getattr(author, 'first_name', None) or ""
+                
+                if full_name and str(full_name).lower() != 'none' and full_name.strip():
+                    full_names.append(full_name.strip())
+                    # Extract surname and first_name from full_name
+                    name_parts = full_name.strip().split()
+                    if len(name_parts) >= 2:
+                        family_names.append(name_parts[-1])
+                        given_names.append(" ".join(name_parts[:-1]))
+                    elif len(name_parts) == 1:
+                        family_names.append(name_parts[0])
+                else:
+                    # Fallback to surname/first_name
+                    if surname and str(surname).lower() != 'none' and surname.strip():
+                        family_names.append(surname)
+                    if first_name and str(first_name).lower() != 'none' and first_name.strip():
+                        given_names.append(first_name)
         
         # Calculate quality metrics
         confidence_scores = ner_result.get('confidence_scores', {})
@@ -156,6 +194,7 @@ class NERReferenceParser:
         result_dict = {
             'family_names': family_names,
             'given_names': given_names,
+            'full_names': full_names,  # Include full_names to preserve complete author names
             'year': ner_result.get('year'),
             'title': ner_result.get('title'),
             'journal': ner_result.get('journal'),

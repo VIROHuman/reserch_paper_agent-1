@@ -167,14 +167,26 @@ class DOIMetadataExtractor:
                     if full_name:
                         authors.append(full_name)
             
-            # Extract publication year
+            # Extract publication year and month
             year = None
+            issue_month = None
+            date_parts = None
             if "published-print" in item and "date-parts" in item["published-print"]:
-                year = item["published-print"]["date-parts"][0][0]
+                date_parts = item["published-print"]["date-parts"][0]
             elif "published-online" in item and "date-parts" in item["published-online"]:
-                year = item["published-online"]["date-parts"][0][0]
+                date_parts = item["published-online"]["date-parts"][0]
             elif "published" in item and "date-parts" in item["published"]:
-                year = item["published"]["date-parts"][0][0]
+                date_parts = item["published"]["date-parts"][0]
+            
+            if date_parts:
+                year = date_parts[0] if len(date_parts) > 0 else None
+                if len(date_parts) > 1 and date_parts[1]:
+                    # Convert month number to month name
+                    month_num = int(date_parts[1])
+                    month_names = ["January", "February", "March", "April", "May", "June",
+                                 "July", "August", "September", "October", "November", "December"]
+                    if 1 <= month_num <= 12:
+                        issue_month = month_names[month_num - 1]
             
             # Extract title
             title = None
@@ -204,6 +216,7 @@ class DOIMetadataExtractor:
                 "publisher": item.get("publisher"),
                 "year": year,
                 "volume": item.get("volume"),
+                "issue_month": issue_month,
                 "issue": item.get("issue"),
                 "pages": item.get("page"),
                 "abstract": abstract,

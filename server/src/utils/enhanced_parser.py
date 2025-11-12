@@ -57,10 +57,22 @@ class EnhancedReferenceParser:
             # This means it was already converted by _convert_ner_to_api_format
             if 'family_names' in ner_result and 'given_names' in ner_result:
                 logger.info("[DEBUG] NER result already has family_names/given_names structure")
-                # Return as-is (just ensure keys match)
+                # Return as-is (just ensure keys match), but build full_names if missing
+                full_names = ner_result.get('full_names', [])
+                if not full_names:
+                    # Build full_names from family_names + given_names if not present
+                    family_names_list = ner_result.get('family_names', [])
+                    given_names_list = ner_result.get('given_names', [])
+                    for i, family in enumerate(family_names_list):
+                        given = given_names_list[i] if i < len(given_names_list) else ""
+                        if given and family:
+                            full_names.append(f"{given} {family}")
+                        elif family:
+                            full_names.append(family)
                 return {
                     "family_names": ner_result.get('family_names', []),
                     "given_names": ner_result.get('given_names', []),
+                    "full_names": full_names,
                     "year": ner_result.get('year'),
                     "title": ner_result.get('title'),
                     "journal": ner_result.get('journal'),
@@ -85,30 +97,64 @@ class EnhancedReferenceParser:
             
             family_names = []
             given_names = []
+            full_names = []
             
             for author in authors:
                 logger.info(f"[DEBUG] Processing author - type: {type(author)}, author keys: {author.keys() if isinstance(author, dict) else 'N/A'}")
                 try:
                     if isinstance(author, dict):
-                        # Dictionary format - check both 'fnm' (alias) and 'first_name'
-                        # Also check for both 'surname' and 'family_name'
+                        # Dictionary format - prioritize full_name, then extract surname/first_name
+                        full_name = author.get('full_name') or ""
                         surname = author.get('surname') or author.get('family_name') or ""
                         first_name = author.get('first_name') or author.get('fnm') or ""
                         
-                        # Only add if surname exists and is not 'None' string
-                        if surname and str(surname).lower() != 'none' and surname.strip():
-                            family_names.append(surname)
-                        if first_name and str(first_name).lower() != 'none' and first_name.strip():
-                            given_names.append(first_name)
+                        # Prioritize full_name if available
+                        if full_name and str(full_name).lower() != 'none' and full_name.strip():
+                            full_names.append(full_name.strip())
+                            # Extract surname and first_name from full_name for backward compatibility
+                            name_parts = full_name.strip().split()
+                            if len(name_parts) >= 2:
+                                family_names.append(name_parts[-1])
+                                given_names.append(" ".join(name_parts[:-1]))
+                            elif len(name_parts) == 1:
+                                family_names.append(name_parts[0])
+                        else:
+                            # Fallback to surname/first_name if full_name not available
+                            if surname and str(surname).lower() != 'none' and surname.strip():
+                                family_names.append(surname)
+                            if first_name and str(first_name).lower() != 'none' and first_name.strip():
+                                given_names.append(first_name)
                     elif isinstance(author, str):
-                        # String format
-                        family_names.append(author)
+                        # String format - treat as full_name
+                        full_names.append(author.strip())
+                        name_parts = author.strip().split()
+                        if len(name_parts) >= 2:
+                            family_names.append(name_parts[-1])
+                            given_names.append(" ".join(name_parts[:-1]))
+                        elif len(name_parts) == 1:
+                            family_names.append(name_parts[0])
                     elif hasattr(author, 'surname'):
-                        # Pydantic Author object
-                        if author.surname and author.surname != 'None':
-                            family_names.append(author.surname)
-                        if author.first_name and author.first_name != 'None':
-                            given_names.append(author.first_name)
+                        # Pydantic Author object - prioritize full_name
+                        full_name = getattr(author, 'full_name', None) or ""
+                        surname = getattr(author, 'surname', None) or ""
+                        first_name = getattr(author, 'first_name', None) or ""
+                        
+                        # Prioritize full_name if available
+                        if full_name and str(full_name).lower() != 'none' and full_name.strip():
+                            full_names.append(full_name.strip())
+                            # Extract surname and first_name from full_name
+                            name_parts = full_name.strip().split()
+                            if len(name_parts) >= 2:
+                                family_names.append(name_parts[-1])
+                                given_names.append(" ".join(name_parts[:-1]))
+                            elif len(name_parts) == 1:
+                                family_names.append(name_parts[0])
+                        else:
+                            # Fallback to surname/first_name
+                            if surname and str(surname).lower() != 'none' and surname.strip():
+                                family_names.append(surname)
+                            if first_name and str(first_name).lower() != 'none' and first_name.strip():
+                                given_names.append(first_name)
                 except Exception as author_error:
                     logger.warning(f"Error processing author: {author_error}, skipping author")
                     continue
@@ -116,6 +162,7 @@ class EnhancedReferenceParser:
             return {
                 "family_names": family_names,
                 "given_names": given_names,
+                "full_names": full_names,  # Add full_names to return
                 "year": ner_result.get('year'),
                 "title": ner_result.get('title'),
                 "journal": ner_result.get('journal'),

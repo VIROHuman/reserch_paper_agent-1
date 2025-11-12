@@ -16,6 +16,7 @@ class ReferenceData(BaseModel):
     journal: Optional[str] = None
     volume: Optional[str] = None
     issue: Optional[str] = None
+    issue_month: Optional[str] = None
     pages: Optional[str] = None
     doi: Optional[str] = None
     url: Optional[str] = None

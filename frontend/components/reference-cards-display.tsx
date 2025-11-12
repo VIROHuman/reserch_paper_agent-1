@@ -48,11 +48,13 @@ interface ReferenceData {
     year: number
     title: string
     journal: string
+    volume?: string
     doi: string
     pages: string
     publisher: string
     url: string
     abstract: string
+    issueMonth?: string
   }
   qualityMetrics: {
     qualityImprovement: number
@@ -94,11 +96,13 @@ function normalizeReference(ref: any): ReferenceData {
       year: ref.extractedFields?.year || ref.extracted_fields?.year || 0,
       title: ref.extractedFields?.title || ref.extracted_fields?.title || "",
       journal: ref.extractedFields?.journal || ref.extracted_fields?.journal || "",
+      volume: ref.extractedFields?.volume || ref.extracted_fields?.volume || "",
       doi: ref.extractedFields?.doi || ref.extracted_fields?.doi || "",
       pages: ref.extractedFields?.pages || ref.extracted_fields?.pages || "",
       publisher: ref.extractedFields?.publisher || ref.extracted_fields?.publisher || "",
       url: ref.extractedFields?.url || ref.extracted_fields?.url || "",
       abstract: ref.extractedFields?.abstract || ref.extracted_fields?.abstract || "",
+      issueMonth: ref.extractedFields?.issueMonth || ref.extracted_fields?.issue_month || ref.extracted_fields?.issueMonth || "",
     },
     qualityMetrics: {
       qualityImprovement: ref.qualityMetrics?.qualityImprovement || ref.quality_metrics?.quality_improvement || 0,
@@ -117,6 +121,7 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
   const [searchTerm, setSearchTerm] = useState("")
   const [filterStatus, setFilterStatus] = useState("all")
   const [showOriginalText, setShowOriginalText] = useState<Set<number>>(new Set())
+  const [copyFeedback, setCopyFeedback] = useState<string | null>(null)
 
 
   if (!data || data.length === 0) {
@@ -173,6 +178,22 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
     navigator.clipboard.writeText(text)
   }
 
+  const copyAllTaggingOutputs = () => {
+    const validOutputs = filteredReferences.filter((ref) => ref.taggedOutput && ref.taggedOutput.trim() !== "")
+    const allOutputs = validOutputs
+      .map((ref) => ref.taggedOutput)
+      .join("\n\n")
+    
+    if (allOutputs) {
+      copyToClipboard(allOutputs)
+      setCopyFeedback(`Copied ${validOutputs.length} tagging output${validOutputs.length !== 1 ? 's' : ''} to clipboard!`)
+      setTimeout(() => setCopyFeedback(null), 3000)
+    } else {
+      setCopyFeedback("No tagging outputs available to copy.")
+      setTimeout(() => setCopyFeedback(null), 2000)
+    }
+  }
+
   const getStatusIcon = (qualityScore: number | undefined, hasError?: boolean) => {
     if (hasError || qualityScore === undefined) return <XCircle className="h-4 w-4 text-destructive" />
     const percentageScore = Math.round((qualityScore || 0) * 100)
@@ -217,6 +238,22 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
           Reference Analysis ({validReferences.length} references)
         </h2>
         <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={copyAllTaggingOutputs}
+              className="flex items-center gap-1"
+            >
+              <Copy className="h-4 w-4" />
+              Copy All XML
+            </Button>
+            {copyFeedback && (
+              <span className="text-xs text-muted-foreground animate-in fade-in-0">
+                {copyFeedback}
+              </span>
+            )}
+          </div>
           <Button
             variant="outline"
             size="sm"
@@ -383,7 +420,7 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                             }
                           </span>
                         </div>
-                        <div className="flex justify-between">
+                        <div className="flex flex-col space-y-1">
                           <span className="text-xs text-muted-foreground">Year:</span>
                           <span className="text-xs font-medium">{reference.extractedFields?.year || "N/A"}</span>
                         </div>
@@ -393,7 +430,7 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                             {reference.extractedFields?.journal || "N/A"}
                           </span>
                         </div>
-                        <div className="flex justify-between">
+                        <div className="flex flex-col space-y-1">
                           <span className="text-xs text-muted-foreground">Pages:</span>
                           <span className="text-xs font-medium">{reference.extractedFields?.pages || "N/A"}</span>
                         </div>
@@ -419,17 +456,20 @@ export function ReferenceCardsDisplay({ data }: ReferenceCardsDisplayProps) {
                           </span>
                         </div>
                         <div className="flex flex-col space-y-1">
-                          <span className="text-xs text-muted-foreground">URL:</span>
-                          <div className="flex items-center gap-1">
-                            <span className="text-xs font-medium text-wrap-break-all flex-1">
-                              {reference.extractedFields?.url ? "Available" : "N/A"}
-                            </span>
-                            {reference.extractedFields?.url && (
-                              <Button variant="ghost" size="sm" className="h-4 w-4 p-0 flex-shrink-0">
-                                <ExternalLink className="h-3 w-3" />
-                              </Button>
-                            )}
-                          </div>
+                          <span className="text-xs text-muted-foreground">Issue:</span>
+                          <span className="text-xs font-medium">
+                            {reference.extractedFields?.issueMonth && reference.extractedFields.issueMonth.trim() 
+                              ? reference.extractedFields.issueMonth 
+                              : "N/A"}
+                          </span>
+                        </div>
+                        <div className="flex flex-col space-y-1">
+                          <span className="text-xs text-muted-foreground">Volume:</span>
+                          <span className="text-xs font-medium">
+                            {reference.extractedFields?.volume && reference.extractedFields.volume.trim() 
+                              ? reference.extractedFields.volume 
+                              : "N/A"}
+                          </span>
                         </div>
                       </div>
                     </div>

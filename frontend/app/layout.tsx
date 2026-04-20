@@ -8,10 +8,11 @@ const inter = Inter({
   variable: "--font-sans",
 })
 
+import { AuthProvider } from "@/context/auth-context"
+
 export const metadata: Metadata = {
   title: "Research Paper Reference Agent",
   description: "AI-powered tool for extracting and enriching academic references from research papers",
-    generator: 'v0.app'
 }
 
 export default function RootLayout({
@@ -21,7 +22,11 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className={`${inter.variable} antialiased`}>
-      <body className="font-sans">{children}</body>
+      <body className="font-sans">
+        <AuthProvider>
+          {children}
+        </AuthProvider>
+      </body>
     </html>
   )
 }

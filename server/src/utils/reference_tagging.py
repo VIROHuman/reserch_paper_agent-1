@@ -1,12 +1,23 @@
 """
 Shared utility module for generating consistent XML tagged output for all references.
 This ensures all parsers produce the same standardized bibitem format.
+
+REDESIGNED: Now uses reference type classification and strict tag schemas
+to prevent semantic errors in XML generation.
 """
 import re
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set, Tuple
+from loguru import logger
 
-logger = logging.getLogger(__name__)
+from .reference_classifier import (
+    ReferenceType,
+    ReferenceTypeClassifier,
+    ReferenceTagSchema,
+    normalize_doi
+)
+from .strict_normalization_validator import StrictNormalizationValidator
+from .safe_string_utils import safe_strip, is_valid_doi
 
 
 def extract_volume_issue_info(parsed_ref: Dict[str, Any]) -> Dict[str, str]:
@@ -162,25 +173,23 @@ def normalize_parsed_reference(parsed_ref: Dict[str, Any]) -> Dict[str, Any]:
             normalized["year"] = None
     
     # Handle scalar string fields - ensure None becomes empty string, not "None"
-    normalized["title"] = str(parsed_ref.get("title") or "").strip()
-    normalized["journal"] = str(parsed_ref.get("journal") or "").strip()
-    normalized["pages"] = str(parsed_ref.get("pages") or "").strip()
-    normalized["doi"] = str(parsed_ref.get("doi") or "").strip()
-    normalized["url"] = str(parsed_ref.get("url") or "").strip()
-    normalized["publisher"] = str(parsed_ref.get("publisher") or "").strip()
-    normalized["abstract"] = str(parsed_ref.get("abstract") or "").strip()
+    # Use safe_strip to prevent NoneType errors (FIX #1)
+    normalized["title"] = safe_strip(parsed_ref.get("title")) or ""
+    normalized["journal"] = safe_strip(parsed_ref.get("journal")) or ""
+    normalized["pages"] = safe_strip(parsed_ref.get("pages")) or ""
+    normalized["doi"] = safe_strip(parsed_ref.get("doi")) or ""
+    normalized["url"] = safe_strip(parsed_ref.get("url")) or ""
+    normalized["publisher"] = safe_strip(parsed_ref.get("publisher")) or ""
+    normalized["abstract"] = safe_strip(parsed_ref.get("abstract")) or ""
+    normalized["article_number"] = safe_strip(parsed_ref.get("article_number")) or ""
     
     # Handle volume/issue - may be in separate fields or embedded in journal
     volume_info = extract_volume_issue_info(parsed_ref)
     normalized["volume"] = volume_info.get("volume", "")
     normalized["issue"] = volume_info.get("issue", "")
     
-    # Handle issue_month
-    issue_month = parsed_ref.get("issue_month")
-    if issue_month:
-        normalized["issue_month"] = str(issue_month).strip()
-    else:
-        normalized["issue_month"] = ""
+    # Issue field may contain month names after conflict resolution
+    # No separate issue_month field needed
     
     return normalized
 
@@ -188,101 +197,674 @@ def normalize_parsed_reference(parsed_ref: Dict[str, Any]) -> Dict[str, Any]:
 def generate_tagged_output(parsed_ref: Dict[str, Any], index: int) -> str:
     """
     Generate standardized XML tagged output matching the bibitem format.
-    This function works with any parser's output format by normalizing it first.
+    
+    REDESIGNED: Now uses reference type classification and strict tag schemas
+    to ensure semantically correct XML output.
+    
+    Pipeline:
+    1. Normalize parsed reference
+    2. Classify reference type
+    3. STRICT NORMALIZATION & VALIDATION (NEW)
+       - Normalize page ranges
+       - Enforce canonical DOI format
+       - Resolve issue conflicts
+       - Validate core constraints
+    4. Generate XML using type-specific schema
+    5. Validate schema compliance
+    6. Return XML or flag errors
     
     Args:
         parsed_ref: Dictionary containing parsed reference data (from any parser)
         index: Zero-based index of the reference
         
     Returns:
-        XML string in bibitem format
+        XML string in bibitem format (semantically correct)
     """
-    # Normalize the parsed reference to ensure consistent format
+    # Step 1: Normalize the parsed reference
     ref = normalize_parsed_reference(parsed_ref)
     
-    # Generate label ID (bibitem format)
+    # Step 1a: Normalize author names with particles (before classification)
+    from .name_particle_normalizer import normalize_author_list
+    if ref.get("family_names") and ref.get("given_names"):
+        normalized_family, normalized_given = normalize_author_list(
+            ref.get("family_names", []),
+            ref.get("given_names", [])
+        )
+        ref["family_names"] = normalized_family
+        ref["given_names"] = normalized_given
+    
+    # Step 2: Classify reference type
+    classifier = ReferenceTypeClassifier()
+    ref_type = classifier.classify(ref)
+    
+    # Step 3: STRICT NORMALIZATION & VALIDATION (BEFORE XML GENERATION)
+    validator = StrictNormalizationValidator()
+    
+    # Apply strict normalization directly on dict (avoids Reference model dependency)
+    norm_errors, can_generate_xml = _apply_strict_normalization(ref, ref_type, validator)
+    
+    # Log normalization errors
+    if norm_errors:
+        logger.warning(f"Reference {index + 1} normalization: {norm_errors}")
+    
+    # If core constraints violated, return error XML instead
+    if not can_generate_xml:
+        logger.error(f"Reference {index + 1} core constraints violated - blocking XML generation")
+        return _generate_error_xml(index, norm_errors)
+    
+    # Step 4: Generate XML using type-specific schema
+    xml_parts = _generate_xml_by_type(ref, ref_type, index)
+    
+    # Step 5: Extract used tags for validation
+    used_tags = _extract_used_tags(''.join(xml_parts))
+    
+    # Step 6: Validate schema compliance
+    is_valid, errors = ReferenceTagSchema.validate_schema(ref_type, used_tags)
+    
+    if not is_valid:
+        logger.warning(f"Reference {index + 1} schema validation errors: {errors}")
+        # Still return XML but log errors for quality tracking
+    
+    return ''.join(xml_parts)
+
+
+def _apply_strict_normalization(
+    ref: Dict[str, Any], 
+    ref_type: ReferenceType, 
+    validator: StrictNormalizationValidator
+) -> Tuple[List[str], bool]:
+    """
+    Apply strict normalization and validation to reference dict.
+    
+    Returns:
+        (errors, can_generate_xml)
+    """
+    errors = []
+    can_generate_xml = True
+    
+    # 1. Normalize DOI (STRICT VALIDATION)
+    doi = ref.get("doi", "").strip()
+    if doi:
+        from .safe_string_utils import is_valid_doi
+        
+        # Remove DOI prefixes and normalize
+        normalized_doi = normalize_doi(doi)
+        
+        # STRICT VALIDATION: Use is_valid_doi for comprehensive validation
+        if not is_valid_doi(normalized_doi):
+            errors.append(f"DOI format invalid: '{doi}' → '{normalized_doi}'")
+            # Try to fix
+            fixed_doi = _attempt_doi_fix(normalized_doi)
+            if fixed_doi and is_valid_doi(fixed_doi):
+                normalized_doi = fixed_doi
+                errors.append(f"DOI auto-corrected to: '{normalized_doi}'")
+            else:
+                # Invalid DOI - remove it (reject article numbers, volume strings, etc.)
+                logger.warning(f"Rejecting invalid DOI: '{doi}' (normalized: '{normalized_doi}')")
+                ref["doi"] = None
+        else:
+            ref["doi"] = normalized_doi
+    
+    # 2. Normalize page ranges and separate article numbers (with publisher-specific rules)
+    pages = ref.get("pages", "").strip()
+    if pages:
+        from .page_article_separator import separate_pages_and_article_number
+        
+        # Get DOI for publisher-specific detection
+        doi = ref.get("doi", "").strip()
+        
+        # Separate pages and article numbers (handles cases where both exist)
+        # Pass DOI to enable publisher-specific rules (Elsevier, Frontiers)
+        normalized_pages, article_number = separate_pages_and_article_number(pages, doi=doi)
+        
+        # Set article number if found
+        if article_number:
+            ref["article_number"] = article_number
+            errors.append(f"Extracted article number from pages string: '{article_number}'")
+        
+        # Normalize page range
+        if normalized_pages:
+            first_page, last_page = validator.extract_page_range(normalized_pages)
+            if first_page:
+                if last_page:
+                    ref["pages"] = f"{first_page}-{last_page}"
+                else:
+                    ref["pages"] = first_page
+            else:
+                errors.append(f"Invalid page format: '{normalized_pages}'")
+                ref["pages"] = None
+        else:
+            # No pages found - might be article number only
+            if article_number:
+                ref["pages"] = None
+            else:
+                errors.append(f"Could not parse pages/article number from: '{pages}'")
+                ref["pages"] = None
+    
+    # 3. Resolve issue conflicts (month vs numeric)
+    issue = ref.get("issue", "").strip()
+    if issue:
+        # Check for month patterns
+        month_match = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', issue, re.IGNORECASE)
+        number_match = re.search(r'\b\d+\b', issue)
+        
+        if month_match and number_match:
+            # Conflict: both present - prefer numeric
+            ref["issue"] = number_match.group(0)
+            errors.append(f"Issue conflict resolved: '{issue}' → '{number_match.group(0)}' (preferred numeric)")
+        elif month_match and not number_match:
+            # Only month - keep in issue field (may be converted to number by validator)
+            # If conversion failed, keep month name as-is
+            errors.append(f"Issue contains month name: '{issue}' (keeping as-is)")
+    
+    # 4. Validate core constraints (type-specific)
+    if ref_type == ReferenceType.JOURNAL_ARTICLE:
+        # Must have venue (journal name)
+        if not ref.get("journal") or not ref.get("journal", "").strip():
+            errors.append("JOURNAL_ARTICLE must have venue (journal name) - XML generation blocked")
+            can_generate_xml = False
+        
+        # Must have title
+        if not ref.get("title") or not ref.get("title", "").strip():
+            errors.append("JOURNAL_ARTICLE must have title - XML generation blocked")
+            can_generate_xml = False
+        
+        # Must have at least one author
+        if not ref.get("family_names") and not ref.get("full_names"):
+            errors.append("JOURNAL_ARTICLE must have at least one author - XML generation blocked")
+            can_generate_xml = False
+        
+        # Should have volume OR issue OR pages OR article_number
+        # CRITICAL: Do not require pages for Elsevier/Frontiers (they use article numbers)
+        has_identifying_info = bool(
+            ref.get("volume") or
+            ref.get("issue") or
+            ref.get("pages") or
+            ref.get("article_number")
+        )
+        if not has_identifying_info:
+            errors.append("JOURNAL_ARTICLE should have volume, issue, pages, or article_number - XML generation blocked")
+            can_generate_xml = False
+        
+        # Cannot have publisher
+        if ref.get("publisher"):
+            errors.append(f"JOURNAL_ARTICLE cannot have publisher: '{ref['publisher']}' - removing")
+            ref["publisher"] = None
+        
+        # Cannot have conference_name
+        if ref.get("conference_name"):
+            errors.append(f"JOURNAL_ARTICLE cannot have conference_name: '{ref['conference_name']}' - removing")
+            ref["conference_name"] = None
+    
+    elif ref_type == ReferenceType.REPORT:
+        # Must have title
+        if not ref.get("title") or not ref.get("title", "").strip():
+            errors.append("REPORT must have title - XML generation blocked")
+            can_generate_xml = False
+        
+        # Must have publisher (organization)
+        if not ref.get("publisher") or not ref.get("publisher", "").strip():
+            errors.append("REPORT must have publisher (organization) - XML generation blocked")
+            can_generate_xml = False
+        
+        # Must have at least one author
+        if not ref.get("family_names") and not ref.get("full_names"):
+            errors.append("REPORT must have at least one author - XML generation blocked")
+            can_generate_xml = False
+        
+        # CRITICAL: Reports do NOT require pages, volume, issue
+        # Remove journal fields if present
+        if ref.get("journal"):
+            errors.append(f"REPORT cannot have journal: '{ref['journal']}' - removing")
+            ref["journal"] = None
+        
+        if ref.get("volume"):
+            errors.append(f"REPORT cannot have volume: '{ref['volume']}' - removing")
+            ref["volume"] = None
+        
+        if ref.get("issue"):
+            errors.append(f"REPORT cannot have issue: '{ref['issue']}' - removing")
+            ref["issue"] = None
+    
+    return errors, can_generate_xml
+
+
+def _attempt_doi_fix(doi: str) -> Optional[str]:
+    """Attempt to fix common DOI format issues"""
+    # Remove leading/trailing punctuation
+    doi = doi.strip('.,;:()[]{}')
+    
+    # Ensure starts with "10."
+    if not doi.startswith('10.'):
+        match = re.search(r'10\.\d+', doi)
+        if match:
+            doi = doi[match.start():]
+    
+    # Ensure has a slash
+    if '/' not in doi:
+        match = re.match(r'(10\.\d{4,})(.+)', doi)
+        if match:
+            doi = f"{match.group(1)}/{match.group(2)}"
+    
+    return doi if re.match(r'^10\.\d{4,}/[^\s]+$', doi) else None
+
+
+def _generate_error_xml(index: int, errors: List[str]) -> str:
+    """Generate error XML when core constraints are violated"""
+    label_id = f"bib{index + 1}"
+    error_message = "; ".join(errors[:3])  # Limit to first 3 errors
+    return f'<bibitem><label id="{label_id}">INVALID REFERENCE</label><x> </x><error>Core constraints violated: {error_message}</error></bibitem>'
+
+
+def _generate_xml_by_type(ref: Dict[str, Any], ref_type: ReferenceType, index: int) -> List[str]:
+    """
+    Generate XML parts based on reference type and schema.
+    
+    Args:
+        ref: Normalized reference dictionary
+        ref_type: Classified reference type
+        index: Reference index
+        
+    Returns:
+        List of XML string parts
+    """
+    xml_parts = []
+    
+    # Generate label (common to all types)
     label_id = f"bib{index + 1}"
     family_names = ref.get("family_names", [])
+    year = ref.get("year") or "n.d."
     
-    # Generate label text: "FirstAuthor, Year" or "FirstAuthor et al., Year"
-    label_text = ""
-    year = ref.get("year") or "n.d."  # Handle None explicitly
     if family_names:
         first_author = family_names[0]
-        
         if len(family_names) == 1:
             label_text = f"{first_author}, {year}"
         else:
             label_text = f"{first_author} et al., {year}"
     else:
-        # Fallback label
         label_text = f"Reference {index + 1}, {year}"
     
-    # Start building XML with bibitem root
-    xml_parts = [f'<bibitem><label id="{label_id}">{label_text}</label>']
+    xml_parts.append(f'<bibitem><label id="{label_id}">{label_text}</label>')
     
-    # Generate authors section with proper format: <aus><au><snm>...</snm><x>, </x><fnm>...</fnm></au>...
+    # Generate authors (common to all types)
+    authors_xml = _generate_authors_xml(ref)
+    xml_parts.append(authors_xml)
+    
+    # Add year
+    year = ref.get("year")
+    if year:
+        xml_parts.append('<x>, </x><adate>')
+        xml_parts.append(str(year))
+        xml_parts.append('</adate>')
+    
+    # Generate type-specific content
+    schema = ReferenceTagSchema.get_allowed_tags(ref_type)
+    
+    if ref_type == ReferenceType.JOURNAL_ARTICLE:
+        xml_parts.extend(_generate_journal_article_xml(ref, schema))
+    elif ref_type == ReferenceType.BOOK:
+        xml_parts.extend(_generate_book_xml(ref, schema))
+    elif ref_type == ReferenceType.CONFERENCE_PAPER:
+        xml_parts.extend(_generate_conference_paper_xml(ref, schema))
+    elif ref_type == ReferenceType.BOOK_CHAPTER:
+        xml_parts.extend(_generate_book_chapter_xml(ref, schema))
+    elif ref_type == ReferenceType.REPORT:
+        xml_parts.extend(_generate_report_xml(ref, schema))
+    elif ref_type == ReferenceType.THESIS:
+        xml_parts.extend(_generate_thesis_xml(ref, schema))
+    else:  # UNKNOWN
+        # Generate minimal XML and flag as invalid
+        title = safe_strip(ref.get("title")) or ""
+        if title and "atl" in schema:
+            xml_parts.append('<x>. </x><atl>')
+            xml_parts.append(title)
+            xml_parts.append('</atl>')
+        elif title and "btl" in schema:
+            xml_parts.append('<x>. </x><btl>')
+            xml_parts.append(title)
+            xml_parts.append('</btl>')
+        logger.error(f"Reference {index + 1} classified as UNKNOWN - XML may be invalid")
+    
+    # Add DOI (allowed for all types) - already normalized by strict validator
+    doi = safe_strip(ref.get("doi")) or ""
+    if doi and "doi" in schema:
+        from .safe_string_utils import is_valid_doi
+        
+        # STRICT VALIDATION: Double-check format using is_valid_doi (already imported)
+        if is_valid_doi(doi):
+            xml_parts.append('<x>. </x><doi>')
+            xml_parts.append(doi)
+            xml_parts.append('</doi>')
+        else:
+            logger.warning(f"Reference {index + 1}: DOI format still invalid after normalization: {doi}")
+    
+    url = safe_strip(ref.get("url")) or ""
+    if url and "url" in schema:
+        xml_parts.append('<x>. </x><url url="')
+        xml_parts.append(url)
+        xml_parts.append('" title="')
+        xml_parts.append(url)
+        xml_parts.append('">')
+        xml_parts.append(url)
+        xml_parts.append('</url>')
+    
+    # Close bibitem
+    xml_parts.append('<x>.</x></bibitem>')
+    
+    return xml_parts
+
+
+def _generate_journal_article_xml(ref: Dict[str, Any], schema: Set[str]) -> List[str]:
+    """Generate XML for journal articles with normalized page ranges"""
+    parts = []
+    title = safe_strip(ref.get("title")) or ""
+    
+    # Prefer API journal title for better casing (e.g., "Cell Metabolism" vs "cell metabolism")
+    journal = safe_strip(ref.get("journal")) or ""
+    api_journal = safe_strip(ref.get("api_journal")) or safe_strip(ref.get("enrichment_journal")) or ""
+    if api_journal:
+        journal = api_journal
+    
+    if title and "atl" in schema:
+        parts.append('<x>. </x><atl>')
+        parts.append(title)
+        parts.append('</atl>')
+    
+    if journal and "stl" in schema:
+        parts.append('<x>. </x><stl>')
+        parts.append(journal)
+        parts.append('</stl>')
+        
+        volume_info = extract_volume_issue_info(ref)
+        if volume_info.get("volume") and "vol" in schema:
+            parts.append('<x> </x><vol>')
+            parts.append(str(volume_info["volume"]))
+            parts.append('</vol>')
+        
+        # Issue handling - use normalized issue (may contain month name if conflict resolution kept it)
+        issue = safe_strip(ref.get("issue")) or ""
+        
+        if issue and "iss" in schema:
+            parts.append('<x>(</x><iss>')
+            parts.append(str(issue))
+            parts.append('</iss><x>)</x>')
+    
+    # Pages AND article number (both can exist together)
+    article_number = safe_strip(ref.get("article_number")) or ""
+    pages = safe_strip(ref.get("pages")) or ""
+    
+    # CRITICAL: Both pages and article_number can be emitted together
+    # Pages come first, then article number
+    has_pages = False
+    
+    if pages and "first-page" in schema:
+        # Extract page range
+        from .page_article_separator import extract_first_last_page
+        first_page, last_page = extract_first_last_page(pages)
+        
+        if first_page:
+            parts.append('<x> </x>')
+            has_pages = True
+            if last_page:
+                # Page range
+                parts.append('<first-page>')
+                parts.append(first_page)
+                parts.append('</first-page><x>-</x><last-page>')
+                parts.append(last_page)
+                parts.append('</last-page>')
+            else:
+                # Single page
+                parts.append('<first-page>')
+                parts.append(first_page)
+                parts.append('</first-page>')
+    
+    # Article number (can be emitted even if pages exist)
+    if article_number and "atlno" in schema:
+        # Clean article number: remove punctuation, ensure it's just the number
+        article_number = article_number.strip().rstrip('.,;:')
+        # Remove any leading/trailing spaces or punctuation
+        article_number = re.sub(r'^[^\w]*', '', article_number)
+        article_number = re.sub(r'[^\w]*$', '', article_number)
+        
+        if article_number:
+            # Add separator if pages were emitted
+            if has_pages:
+                parts.append('<x>, </x>')
+            else:
+                parts.append('<x> </x>')
+            
+            parts.append('<atlno>')
+            parts.append(article_number)
+            parts.append('</atlno>')
+    
+    return parts
+
+
+def _generate_book_xml(ref: Dict[str, Any], schema: Set[str]) -> List[str]:
+    """Generate XML for books"""
+    parts = []
+    title = safe_strip(ref.get("title")) or ""
+    
+    if title and "btl" in schema:
+        parts.append('<x>. </x><btl>')
+        parts.append(title)
+        parts.append('</btl>')
+    
+    publisher = safe_strip(ref.get("publisher")) or ""
+    if publisher and "pub" in schema:
+        parts.append('<x>. </x><pub>')
+        parts.append(publisher)
+        parts.append('</pub>')
+    
+    # Note: city field not currently extracted, but would go here if available
+    # if city and "city" in schema:
+    #     parts.append('<x>. </x><city>')
+    #     parts.append(city)
+    #     parts.append('</city>')
+    
+    return parts
+
+
+def _generate_conference_paper_xml(ref: Dict[str, Any], schema: Set[str]) -> List[str]:
+    """Generate XML for conference papers"""
+    parts = []
+    title = safe_strip(ref.get("title")) or ""
+    journal = safe_strip(ref.get("journal")) or ""  # May contain conference name
+    
+    if title and "atl" in schema:
+        parts.append('<x>. </x><atl>')
+        parts.append(title)
+        parts.append('</atl>')
+    
+    # Conference title goes in <ebtl>
+    if journal and "ebtl" in schema:
+        parts.append('<x>. </x><ebtl>')
+        parts.append(journal)
+        parts.append('</ebtl>')
+    
+    publisher = safe_strip(ref.get("publisher")) or ""
+    if publisher and "pub" in schema:
+        parts.append('<x>. </x><pub>')
+        parts.append(publisher)
+        parts.append('</pub>')
+    
+    # Pages
+    pages = safe_strip(ref.get("pages")) or ""
+    if pages and "first-page" in schema:
+        parts.append('<x>: </x>')
+        if '-' in pages or '–' in pages or '—' in pages:
+            page_parts = re.split(r'[-–—]', pages, 1)
+            if len(page_parts) == 2:
+                parts.append('<first-page>')
+                parts.append(page_parts[0].strip())
+                parts.append('</first-page><x>-</x><last-page>')
+                parts.append(page_parts[1].strip())
+                parts.append('</last-page>')
+            else:
+                parts.append('<first-page>')
+                parts.append(pages)
+                parts.append('</first-page>')
+        else:
+            parts.append('<first-page>')
+            parts.append(pages)
+            parts.append('</first-page>')
+    
+    return parts
+
+
+def _generate_book_chapter_xml(ref: Dict[str, Any], schema: Set[str]) -> List[str]:
+    """Generate XML for book chapters"""
+    parts = []
+    title = safe_strip(ref.get("title")) or ""
+    
+    if title and "atl" in schema:
+        parts.append('<x>. </x><atl>')
+        parts.append(title)
+        parts.append('</atl>')
+    
+    # Book title (may be in journal field or need extraction)
+    journal = safe_strip(ref.get("journal")) or ""
+    if journal and "ebtl" in schema:
+        parts.append('<x>. In </x><ebtl>')
+        parts.append(journal)
+        parts.append('</ebtl>')
+    
+    publisher = safe_strip(ref.get("publisher")) or ""
+    if publisher and "pub" in schema:
+        parts.append('<x>: </x><pub>')
+        parts.append(publisher)
+        parts.append('</pub>')
+    
+    # Pages
+    pages = safe_strip(ref.get("pages")) or ""
+    if pages and "first-page" in schema:
+        parts.append('<x>, </x>')
+        if '-' in pages or '–' in pages or '—' in pages:
+            page_parts = re.split(r'[-–—]', pages, 1)
+            if len(page_parts) == 2:
+                parts.append('<first-page>')
+                parts.append(page_parts[0].strip())
+                parts.append('</first-page><x>–</x><last-page>')
+                parts.append(page_parts[1].strip())
+                parts.append('</last-page>')
+            else:
+                parts.append('<first-page>')
+                parts.append(pages)
+                parts.append('</first-page>')
+        else:
+            parts.append('<first-page>')
+            parts.append(pages)
+            parts.append('</first-page>')
+    
+    return parts
+
+
+def _generate_report_xml(ref: Dict[str, Any], schema: Set[str]) -> List[str]:
+    """Generate XML for reports"""
+    parts = []
+    title = safe_strip(ref.get("title")) or ""
+    
+    # Reports use <atl> (article title), not <btl>
+    if title and "atl" in schema:
+        parts.append('<x>. </x><atl>')
+        parts.append(title)
+        parts.append('</atl>')
+    
+    # Publisher (organization) is REQUIRED for reports
+    publisher = safe_strip(ref.get("publisher")) or ""
+    if publisher and "pub" in schema:
+        parts.append('<x>. </x><pub>')
+        parts.append(publisher)
+        parts.append('</pub>')
+    
+    # Report number (if available) can go in msc3
+    report_number = safe_strip(ref.get("report_number")) or safe_strip(ref.get("msc3")) or ""
+    if report_number and "msc3" in schema:
+        parts.append('<x> </x><msc3>')
+        parts.append(report_number)
+        parts.append('</msc3>')
+    
+    # Pages are OPTIONAL for reports (not required)
+    pages = safe_strip(ref.get("pages")) or ""
+    if pages and "first-page" in schema:
+        from .page_article_separator import extract_first_last_page
+        first_page, last_page = extract_first_last_page(pages)
+        
+        parts.append('<x>, </x>')
+        if first_page and last_page:
+            parts.append('<first-page>')
+            parts.append(first_page)
+            parts.append('</first-page><x>-</x><last-page>')
+            parts.append(last_page)
+            parts.append('</last-page>')
+        elif first_page:
+            parts.append('<first-page>')
+            parts.append(first_page)
+            parts.append('</first-page>')
+    
+    return parts
+
+
+def _generate_thesis_xml(ref: Dict[str, Any], schema: Set[str]) -> List[str]:
+    """Generate XML for thesis/dissertation"""
+    parts = []
+    title = safe_strip(ref.get("title")) or ""
+    
+    if title and "atl" in schema:
+        parts.append('<x>. </x><atl>')
+        parts.append(title)
+        parts.append('</atl>')
+    
+    # Publisher contains university/institution (REQUIRED for thesis)
+    publisher = safe_strip(ref.get("publisher")) or ""
+    if publisher and "pub" in schema:
+        parts.append('<x>. </x><pub>')
+        parts.append(publisher)
+        parts.append('</pub>')
+    
+    return parts
+
+
+def _generate_authors_xml(ref: Dict[str, Any]) -> str:
+    """Generate authors XML section (common to all types) with particle-aware normalization"""
+    from .name_particle_normalizer import normalize_author_list
+    
     authors_parts = ['<x> </x><aus>']
     full_names = ref.get("full_names", [])
     given_names = ref.get("given_names", [])
     family_names = ref.get("family_names", [])
     
-    # Priority 1: Use API-provided family_names and given_names if available
-    # Use the API's classification exactly as provided - no modifications, no heuristics
-    # Whatever the API says is surname → family_names → <snm>
-    # Whatever the API says is first_name → given_names → <fnm>
-    # Only fall back to parsing full_names if family_names are not available from API
-    # Note: We use API names if family_names exist, even if given_names is incomplete (some authors may only have surnames)
     use_api_names = family_names and len(family_names) > 0
     
     if use_api_names:
-        # Use API-provided names directly - use exactly what the API provided
-        # The API's surname/first_name classification is used as-is for snm/fnm tags
-        # Match family_names and given_names by index
-        num_authors = max(len(family_names), len(given_names))
+        # Normalize author names to handle particles correctly
+        normalized_family, normalized_given = normalize_author_list(family_names, given_names)
         
-        # Debug: Log what we have
-        logger.debug(f"Tagging - family_names: {family_names}, given_names: {given_names}, num_authors: {num_authors}")
-        
-        # First, collect all valid authors (non-empty surnames)
+        num_authors = max(len(normalized_family), len(normalized_given))
         valid_authors = []
         for i in range(num_authors):
-            surname_raw = family_names[i] if i < len(family_names) else None
-            given_name_raw = given_names[i] if i < len(given_names) else None
-            
+            surname_raw = normalized_family[i] if i < len(normalized_family) else None
+            given_name_raw = normalized_given[i] if i < len(normalized_given) else None
             surname = str(surname_raw).strip() if surname_raw is not None else ""
             given_name = str(given_name_raw).strip() if given_name_raw is not None else ""
-            
-            # Debug: Log each author
-            logger.debug(f"Author {i}: surname='{surname}' (→ <snm>), given_name='{given_name}' (→ <fnm>)")
-            
             if surname:
                 valid_authors.append((surname, given_name))
         
-        # Generate XML for valid authors with proper separators
-        # Use API's classification directly: family_names → <snm>, given_names → <fnm>
         for i, (surname, given_name) in enumerate(valid_authors):
-            # Add separator before this author if it's not the first
             if i > 0:
-                # Add "and" before last author, comma otherwise
                 if i == len(valid_authors) - 1:
                     authors_parts.append('<x>, and </x>')
                 else:
                     authors_parts.append('<x>, </x>')
             
             if given_name:
-                # Both surname and given name available from API - use directly
                 authors_parts.append(f'<au><snm>{surname}</snm><x>, </x><fnm>{given_name}</fnm></au>')
             else:
-                # Only surname available from API
                 authors_parts.append(f'<au><snm>{surname}</snm></au>')
     else:
-        # Fallback: Parse from full_names if API names not available
-        # This handles cases where no API was called or API didn't return separate fields
         if full_names and len(full_names) > 0:
             author_list = full_names
         else:
-            # Build from family_names + given_names (if only partial data available)
             author_list = []
             for i, family in enumerate(family_names):
                 given = given_names[i] if i < len(given_names) else ""
@@ -291,122 +873,33 @@ def generate_tagged_output(parsed_ref: Dict[str, Any], index: int) -> str:
                 elif family:
                     author_list.append(family)
         
-        # Generate author XML by parsing full names (fallback method)
         for i, author_name in enumerate(author_list):
             if author_name:
                 name_parts = author_name.strip().split()
                 if len(name_parts) >= 2:
                     surname = name_parts[-1].strip()
                     given_name = " ".join(name_parts[:-1]).strip()
-                    # Preserve periods in initials (e.g., "A." or "E.A.S.")
-                    # Format: <au><snm>...</snm><x>, </x><fnm>...</fnm></au>
                     authors_parts.append(f'<au><snm>{surname}</snm><x>, </x><fnm>{given_name}</fnm></au>')
                 elif len(name_parts) == 1:
-                    # Only surname
                     authors_parts.append(f'<au><snm>{name_parts[0].strip()}</snm></au>')
                 
-                # Add separator between authors
                 if i < len(author_list) - 1:
-                    # Check if next-to-last author (add "and" before last)
                     if i == len(author_list) - 2:
                         authors_parts.append('<x>, and </x>')
                     else:
                         authors_parts.append('<x>, </x>')
     
     authors_parts.append('</aus>')
-    xml_parts.append(''.join(authors_parts))
+    return ''.join(authors_parts)
+
+
+def _extract_used_tags(xml_string: str) -> Set[str]:
+    """Extract all XML tags used in the generated XML (excluding structural tags)"""
+    # Find all XML tags, excluding <x> (punctuation) and structural tags
+    tag_pattern = r'<([a-z-]+)(?:\s[^>]*)?>'
+    tags = set(re.findall(tag_pattern, xml_string, re.IGNORECASE))
     
-    # Add date (year)
-    year = ref.get("year")
-    if year:
-        xml_parts.append('<x>, </x><adate>')
-        xml_parts.append(str(year))
-        xml_parts.append('</adate>')
-    
-    # Generate title section - use <atl> for article title, <btl> for book title
-    title = ref.get("title", "")
-    if title:
-        # Determine if it's a book or article based on presence of journal
-        if ref.get("journal"):
-            # Article title
-            xml_parts.append('<x>. </x><atl>')
-            xml_parts.append(title.strip())
-            xml_parts.append('</atl>')
-        else:
-            # Book title
-            xml_parts.append('<x>. </x><btl>')
-            xml_parts.append(title.strip())
-            xml_parts.append('</btl>')
-    
-    # Generate journal/source title (<stl>)
-    if ref.get("journal"):
-        xml_parts.append('<x>. </x><stl>')
-        xml_parts.append(ref["journal"].strip())
-        xml_parts.append('</stl>')
-        
-        # Add volume and issue if available
-        volume_info = extract_volume_issue_info(ref)
-        if volume_info.get("volume"):
-            xml_parts.append('<x> </x><vol>')
-            xml_parts.append(str(volume_info["volume"]))
-            xml_parts.append('</vol>')
-        
-        if volume_info.get("issue"):
-            xml_parts.append('<x>(</x><iss>')
-            xml_parts.append(str(volume_info["issue"]))
-            xml_parts.append('</iss><x>)</x>')
-        
-        # Add issue month if available
-        issue_month = ref.get("issue_month", "")
-        if issue_month:
-            xml_parts.append('<x> </x><issue>')
-            xml_parts.append(issue_month.strip())
-            xml_parts.append('</issue>')
-    
-    # Generate pages section - handle both page ranges and article numbers
-    pages = ref.get("pages", "")
-    # Check if it looks like an article number instead of pages
-    if pages and not re.match(r'^\d+[-–—]?\d*$', pages.strip()) and len(pages.strip()) > 5:
-        # Likely an article number (e.g., "103892", "04022010")
-        xml_parts.append('<x> </x><atlno>')
-        xml_parts.append(pages.strip())
-        xml_parts.append('</atlno>')
-    elif pages:
-        pages = pages.strip()
-        xml_parts.append('<x> </x>')
-        
-        # Parse page range
-        if '-' in pages or '–' in pages or '—' in pages:
-            page_parts = re.split(r'[-–—]', pages, 1)
-            if len(page_parts) == 2:
-                xml_parts.append('<first-page>')
-                xml_parts.append(page_parts[0].strip())
-                xml_parts.append('</first-page><x>-</x><last-page>')
-                xml_parts.append(page_parts[1].strip())
-                xml_parts.append('</last-page>')
-            else:
-                xml_parts.append('<first-page>')
-                xml_parts.append(pages)
-                xml_parts.append('</first-page>')
-        else:
-            xml_parts.append('<first-page>')
-            xml_parts.append(pages)
-            xml_parts.append('</first-page>')
-    
-    # Add publisher if available
-    if ref.get("publisher"):
-        xml_parts.append('<x>. </x><pub>')
-        xml_parts.append(ref["publisher"].strip())
-        xml_parts.append('</pub>')
-    
-    # Add DOI if available
-    if ref.get("doi"):
-        xml_parts.append('<x>. </x><doi>')
-        xml_parts.append(ref["doi"].strip())
-        xml_parts.append('</doi>')
-    
-    # Close bibitem
-    xml_parts.append('<x>.</x></bibitem>')
-    
-    return ''.join(xml_parts)
+    # Remove structural tags that don't need validation
+    structural_tags = {'bibitem', 'label', 'aus', 'au', 'snm', 'fnm', 'adate', 'x', 'url'}
+    return tags - structural_tags
 

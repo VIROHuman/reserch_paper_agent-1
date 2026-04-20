@@ -5,19 +5,14 @@ import asyncio
 from typing import List, Dict, Any, Optional, Tuple
 from loguru import logger
 from dataclasses import dataclass
-from enum import Enum
 
-from .api_clients import CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient, PubMedClient, ArxivClient, circuit_breaker
+from .api_clients import (
+    CrossRefClient, OpenAlexClient, SemanticScholarClient, DOAJClient, 
+    PubMedClient, ArxivClient, circuit_breaker, APIProvider
+)
 from .text_normalizer import text_normalizer
-
-
-class APIProvider(Enum):
-    CROSSREF = "crossref"
-    OPENALEX = "openalex"
-    SEMANTIC_SCHOLAR = "semantic_scholar"
-    DOAJ = "doaj"
-    PUBMED = "pubmed"
-    ARXIV = "arxiv"
+from .mandatory_api_selector import MandatoryAPISelector
+from ..models.reference_models import ReferenceType
 
 
 @dataclass
@@ -68,7 +63,10 @@ class SmartAPIStrategy:
         self.min_confidence = 0.6     # Higher threshold to avoid false positives
         self.max_api_calls = 3        # Conservative number of API calls
         
-        logger.info("Smart API Strategy initialized")
+        # Mandatory API selector (automatically selects APIs based on reference type)
+        self.mandatory_selector = MandatoryAPISelector()
+        
+        logger.info("Smart API Strategy initialized with mandatory API selection")
     
     async def enrich_reference_smart(
         self,
@@ -77,7 +75,8 @@ class SmartAPIStrategy:
         force_enrichment: bool = True,
         aggressive_search: bool = False,
         fill_missing_fields: bool = False,
-        selected_apis: Optional[List[str]] = None
+        reference_type: Optional[ReferenceType] = None,
+        enabled_optional_apis: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         enriched_ref = parsed_ref.copy()
         enrichment_sources = []
@@ -110,15 +109,22 @@ class SmartAPIStrategy:
         
         current_quality = initial_quality  # Initialize current_quality
         
-        # Smart filtering: decide which APIs to call based on existing data or user selection
-        if selected_apis:
-            # User has selected specific APIs - use only those
-            apis_to_call = [APIProvider(api) for api in selected_apis if api in [p.value for p in APIProvider]]
-            logger.info(f"👤 User selected {len(apis_to_call)} APIs: {[api.value for api in apis_to_call]}")
-        else:
-            # Auto-select APIs based on data quality
-            apis_to_call = self._select_apis_smart(parsed_ref, aggressive_search)
-            logger.info(f"🎯 Auto-selected {len(apis_to_call)} APIs to call: {[api.value for api in apis_to_call]}")
+        # AUTOMATIC MANDATORY API SELECTION (based on reference type and identifiers)
+        # Use ReferenceType directly (no conversion needed)
+        if not reference_type:
+            # Try to infer from parsed_ref or default to UNKNOWN
+            reference_type = ReferenceType.UNKNOWN
+        
+        # Automatically select mandatory APIs (cannot be disabled)
+        apis_to_call = self.mandatory_selector.get_all_apis(
+            reference_type=reference_type,
+            parsed_ref=parsed_ref,
+            enabled_optional_apis=enabled_optional_apis
+        )
+        
+        mandatory_count = len(self.mandatory_selector.select_mandatory_apis(reference_type, parsed_ref))
+        optional_count = len(apis_to_call) - mandatory_count
+        logger.info(f"🎯 Auto-selected {len(apis_to_call)} APIs ({mandatory_count} mandatory + {optional_count} optional): {[api.value for api in apis_to_call]}")
         
         if not apis_to_call:
             logger.warning("⚠️ No APIs selected for enrichment")
@@ -1511,6 +1517,7 @@ class SmartAPIStrategy:
             
             if api_family_names:
                 original_family = merged.get("family_names", [])
+                original_given = merged.get("given_names", [])
                 
                 if not original_family:
                     # No original authors - use API authors

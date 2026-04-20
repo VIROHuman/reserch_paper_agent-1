@@ -80,11 +80,11 @@ class ValidationService:
                 
                 logger.info(f"🔍 Validating reference {index}: {ref_text[:60]}...")
                 
-                # Parse with enrichment (no timeout - user controls API selection)
+                # Parse with enrichment (mandatory APIs auto-selected, optional APIs user-controlled)
                 parsed_ref = await self.enhanced_parser.parse_reference_enhanced(
                     ref_text,
                     enable_api_enrichment=True,
-                    selected_apis=getattr(self, '_selected_apis', None)
+                    enabled_optional_apis=getattr(self, '_enabled_optional_apis', None)
                 )
                 
                 # Generate tagged output
@@ -201,9 +201,17 @@ class ValidationService:
                     if self.needs_validation(ref.get("extracted_fields", {}))
                 ]
         
-        # Store selected APIs for use during validation
+        # Store enabled optional APIs for use during validation (mandatory APIs are auto-selected)
         if selected_apis:
-            self._selected_apis = selected_apis
+            # Filter to only optional APIs (mandatory APIs are always included automatically)
+            from .mandatory_api_selector import MandatoryAPISelector
+            selector = MandatoryAPISelector()
+            mandatory_apis = selector.get_mandatory_api_names()
+            optional_apis = [api for api in selected_apis if api not in mandatory_apis]
+            self._enabled_optional_apis = optional_apis
+            logger.info(f"🔧 User enabled {len(optional_apis)} optional APIs: {optional_apis}")
+        else:
+            self._enabled_optional_apis = None
         
         total_to_validate = len(refs_to_validate)
         

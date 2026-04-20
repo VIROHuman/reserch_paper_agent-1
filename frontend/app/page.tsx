@@ -10,6 +10,7 @@ import { ReferenceCardsDisplay } from "@/components/reference-cards-display"
 import { ParsedReferencesView } from "@/components/parsed-references-view"
 import { ValidationControls } from "@/components/validation-controls"
 import { Footer } from "@/components/footer"
+import { ProtectedRoute } from "@/components/protected-route"
 import { useFileProcessing } from "@/hooks/use-api"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -134,10 +135,11 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen bg-background">
-      <Header />
+    <ProtectedRoute>
+      <div className="min-h-screen bg-background">
+        <Header />
 
-      <main className="container mx-auto px-4 py-8 max-w-7xl">
+        <main className="container mx-auto px-4 py-8 max-w-7xl">
         <div className="space-y-8">
           {/* Hero Section */}
           <div className="text-center space-y-4">
@@ -198,9 +200,11 @@ export default function Home() {
                           <ProcessingStatus 
                             isVisible={parseLoading} 
                             progress={{ 
+                              job_id: "local_parse",
                               status: "processing", 
                               progress: 50, 
-                              message: "Extracting and parsing references (fast, no API calls)..." 
+                              message: "Extracting and parsing references (fast, no API calls)...",
+                              current_step: "parsing"
                             }} 
                           />
                         )}
@@ -381,6 +385,7 @@ export default function Home() {
       </main>
 
       <Footer />
-    </div>
+      </div>
+    </ProtectedRoute>
   )
 }

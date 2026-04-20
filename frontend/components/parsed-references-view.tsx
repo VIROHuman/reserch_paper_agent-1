@@ -193,7 +193,7 @@ export function ParsedReferencesView({
                     </p>
 
                     {/* Quick Info */}
-                    {!hasError && (
+                    {!hasError && ref.extracted_fields && (
                       <div className="flex flex-wrap gap-2 text-xs">
                         {ref.extracted_fields.title && (
                           <Badge variant="secondary" className="font-normal">
@@ -235,64 +235,71 @@ export function ParsedReferencesView({
                 <CollapsibleContent>
                   <div className="px-4 pb-4 border-t pt-4 space-y-3">
                     {/* Extracted Fields */}
-                    <div>
-                      <h4 className="text-sm font-medium mb-2">Extracted Fields</h4>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
-                        {ref.extracted_fields.title && (
-                          <div>
-                            <span className="text-muted-foreground">Title:</span>{" "}
-                            <span className="font-medium">{ref.extracted_fields.title}</span>
-                          </div>
-                        )}
-                        {(ref.extracted_fields.full_names || ref.extracted_fields.family_names) && 
-                         (ref.extracted_fields.full_names || ref.extracted_fields.family_names).length > 0 && (
-                          <div>
-                            <span className="text-muted-foreground">Authors:</span>{" "}
-                            <span className="font-medium">
-                              {ref.extracted_fields.full_names && ref.extracted_fields.full_names.length > 0
-                                ? ref.extracted_fields.full_names.join(", ")
-                                : ref.extracted_fields.family_names && ref.extracted_fields.given_names
-                                ? ref.extracted_fields.family_names.map((family: string, i: number) => {
-                                    const given = ref.extracted_fields.given_names?.[i] || ""
-                                    return given ? `${given} ${family}` : family
-                                  }).join(", ")
-                                : ref.extracted_fields.family_names?.join(", ") || "N/A"
-                              }
-                            </span>
-                          </div>
-                        )}
-                        {ref.extracted_fields.year && (
-                          <div>
-                            <span className="text-muted-foreground">Year:</span>{" "}
-                            <span className="font-medium">{ref.extracted_fields.year}</span>
-                          </div>
-                        )}
-                        {ref.extracted_fields.journal && (
-                          <div>
-                            <span className="text-muted-foreground">Journal:</span>{" "}
-                            <span className="font-medium">{ref.extracted_fields.journal}</span>
-                          </div>
-                        )}
-                        {ref.extracted_fields.doi && (
-                          <div>
-                            <span className="text-muted-foreground">DOI:</span>{" "}
-                            <span className="font-medium">{ref.extracted_fields.doi}</span>
-                          </div>
-                        )}
-                        {ref.extracted_fields.pages && (
-                          <div>
-                            <span className="text-muted-foreground">Pages:</span>{" "}
-                            <span className="font-medium">{ref.extracted_fields.pages}</span>
-                          </div>
-                        )}
-                        {ref.extracted_fields.publisher && (
-                          <div>
-                            <span className="text-muted-foreground">Publisher:</span>{" "}
-                            <span className="font-medium">{ref.extracted_fields.publisher}</span>
-                          </div>
-                        )}
+                    {ref.extracted_fields ? (
+                      <div>
+                        <h4 className="text-sm font-medium mb-2">Extracted Fields</h4>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+                          {ref.extracted_fields.title && (
+                            <div>
+                              <span className="text-muted-foreground">Title:</span>{" "}
+                              <span className="font-medium">{ref.extracted_fields.title}</span>
+                            </div>
+                          )}
+                          {(ref.extracted_fields.full_names || ref.extracted_fields.family_names) && 
+                           (ref.extracted_fields.full_names || ref.extracted_fields.family_names).length > 0 && (
+                            <div>
+                              <span className="text-muted-foreground">Authors:</span>{" "}
+                              <span className="font-medium">
+                                {ref.extracted_fields.full_names && ref.extracted_fields.full_names.length > 0
+                                  ? ref.extracted_fields.full_names.join(", ")
+                                  : ref.extracted_fields.family_names && ref.extracted_fields.given_names
+                                  ? ref.extracted_fields.family_names.map((family: string, i: number) => {
+                                      const given = ref.extracted_fields.given_names?.[i] || ""
+                                      return given ? `${given} ${family}` : family
+                                    }).join(", ")
+                                  : ref.extracted_fields.family_names?.join(", ") || "N/A"
+                                }
+                              </span>
+                            </div>
+                          )}
+                          {ref.extracted_fields.year && (
+                            <div>
+                              <span className="text-muted-foreground">Year:</span>{" "}
+                              <span className="font-medium">{ref.extracted_fields.year}</span>
+                            </div>
+                          )}
+                          {ref.extracted_fields.journal && (
+                            <div>
+                              <span className="text-muted-foreground">Journal:</span>{" "}
+                              <span className="font-medium">{ref.extracted_fields.journal}</span>
+                            </div>
+                          )}
+                          {ref.extracted_fields.doi && (
+                            <div>
+                              <span className="text-muted-foreground">DOI:</span>{" "}
+                              <span className="font-medium">{ref.extracted_fields.doi}</span>
+                            </div>
+                          )}
+                          {ref.extracted_fields.pages && (
+                            <div>
+                              <span className="text-muted-foreground">Pages:</span>{" "}
+                              <span className="font-medium">{ref.extracted_fields.pages}</span>
+                            </div>
+                          )}
+                          {ref.extracted_fields.publisher && (
+                            <div>
+                              <span className="text-muted-foreground">Publisher:</span>{" "}
+                              <span className="font-medium">{ref.extracted_fields.publisher}</span>
+                            </div>
+                          )}
+                        </div>
                       </div>
-                    </div>
+                    ) : (
+                      <div>
+                        <h4 className="text-sm font-medium mb-2">Extracted Fields</h4>
+                        <p className="text-sm text-muted-foreground">No fields extracted yet</p>
+                      </div>
+                    )}
 
                     {/* Original Text */}
                     <div>

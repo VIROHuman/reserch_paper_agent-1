@@ -26,11 +26,8 @@ export function useHealthCheck() {
       }
     }
 
+    // Check health only once on mount
     checkHealth()
-
-    // Check health every 30 seconds
-    const interval = setInterval(checkHealth, 30000)
-    return () => clearInterval(interval)
   }, [])
 
   return { data, loading, error, isHealthy: data?.status === "healthy" }

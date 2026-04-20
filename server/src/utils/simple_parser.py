@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional
 from loguru import logger
 from .text_normalizer import text_normalizer
 from .reference_tagging import generate_tagged_output as shared_generate_tagged_output
+from .safe_string_utils import is_valid_doi, looks_like_article_number
 
 
 class SimpleReferenceParser:
@@ -35,10 +36,21 @@ class SimpleReferenceParser:
         if year_match:
             result["year"] = year_match.group()
         
-        # Extract DOI
+        # Extract DOI with STRICT VALIDATION
         doi_match = re.search(r'10\.\d+/[^\s,)]+', text)
         if doi_match:
-            result["doi"] = doi_match.group()
+            candidate_doi = doi_match.group()
+            # STRICT VALIDATION: Check if it's a valid DOI
+            if is_valid_doi(candidate_doi):
+                result["doi"] = candidate_doi
+            elif looks_like_article_number(candidate_doi):
+                # Mislabeled as DOI but is actually article number
+                logger.info(f"Simple parser detected '{candidate_doi}' as DOI but it's an article number, storing as article_number")
+                result["article_number"] = candidate_doi
+                result["doi"] = None
+            else:
+                logger.warning(f"Simple parser detected invalid DOI format: '{candidate_doi}', rejecting")
+                result["doi"] = None
         
         # Extract pages (various formats)
         pages_patterns = [

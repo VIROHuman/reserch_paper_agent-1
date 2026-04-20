@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from loguru import logger
@@ -28,6 +29,10 @@ from ..utils.validation_service import ValidationService
 # Cache removed as requested
 import xml.etree.ElementTree as ET
 import json
+from jose import JWTError, jwt
+from ..models.auth_models import Token, TokenData, User, UserInDB, UserCreate, OTPVerify
+from ..utils.auth_utils import verify_password, create_access_token, get_password_hash, ALGORITHM, SECRET_KEY
+from ..utils.email_utils import send_otp_email, generate_otp
 
 logger.remove()
 
@@ -112,6 +117,125 @@ word_processor = None
 file_handler = None
 enhanced_parser = None
 validation_service = None
+
+# Authentication Configuration
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# Mock Database for User Storage
+MOCK_USERS_DB = {}
+# Temporary storage for unverified registration and login OTPs
+TEMP_USERS = {}
+TEMP_OTPS = {}
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+        token_data = TokenData(email=email)
+    except JWTError:
+        raise credentials_exception
+    
+    user_dict = MOCK_USERS_DB.get(token_data.email)
+    if user_dict is None:
+        raise credentials_exception
+    user = User(**user_dict)
+    if not user.is_active:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return user
+
+
+@app.post("/register")
+async def register(user_in: UserCreate):
+    if user_in.email in MOCK_USERS_DB:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Store registration details temporarily
+    hashed_password = get_password_hash(user_in.password)
+    TEMP_USERS[user_in.email] = {
+        "email": user_in.email,
+        "hashed_password": hashed_password,
+        "full_name": user_in.full_name,
+        "is_active": False
+    }
+    
+    # Send OTP
+    otp = generate_otp()
+    TEMP_OTPS[user_in.email] = otp
+    send_otp_email(user_in.email, otp)
+    
+    return APIResponse(
+        success=True,
+        message="OTP sent to your email. Please verify to complete registration.",
+        data={"email": user_in.email}
+    )
+
+
+@app.post("/verify-registration")
+async def verify_registration(verify_data: OTPVerify):
+    if verify_data.email not in TEMP_USERS or TEMP_OTPS.get(verify_data.email) != verify_data.otp:
+        raise HTTPException(status_code=400, detail="Invalid OTP or email")
+    
+    # Move from temp to main DB
+    user_data = TEMP_USERS.pop(verify_data.email)
+    user_data["is_active"] = True
+    MOCK_USERS_DB[verify_data.email] = user_data
+    TEMP_OTPS.pop(verify_data.email)
+    
+    return APIResponse(
+        success=True,
+        message="Registration successful. You can now login.",
+        data={"email": verify_data.email}
+    )
+
+
+@app.post("/request-login-otp")
+async def request_login_otp(form_data: OAuth2PasswordRequestForm = Depends()):
+    user_dict = MOCK_USERS_DB.get(form_data.username)
+    if not user_dict or not verify_password(form_data.password, user_dict["hashed_password"]):
+        raise HTTPException(status_code=400, detail="Incorrect email or password")
+    
+    if not user_dict.get("is_active"):
+        raise HTTPException(status_code=400, detail="Account not activated")
+    
+    # Send OTP for login
+    otp = generate_otp()
+    TEMP_OTPS[form_data.username] = otp
+    send_otp_email(form_data.username, otp)
+    
+    return APIResponse(
+        success=True,
+        message="OTP sent for login verification.",
+        data={"email": form_data.username}
+    )
+
+
+@app.post("/token")
+async def login_for_access_token(verify_data: OTPVerify):
+    if TEMP_OTPS.get(verify_data.email) != verify_data.otp:
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+    
+    user_dict = MOCK_USERS_DB.get(verify_data.email)
+    if not user_dict:
+         raise HTTPException(status_code=404, detail="User not found")
+         
+    access_token = create_access_token(data={"sub": verify_data.email})
+    TEMP_OTPS.pop(verify_data.email)
+    
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer",
+        "user": {
+            "email": user_dict["email"],
+            "full_name": user_dict.get("full_name")
+        }
+    }
 
 
 def _build_full_names(parsed_ref: dict) -> list:
@@ -1251,15 +1375,20 @@ async def validate_batch_streaming(
     batch_id: str,
     mode: str = Form("standard"),  # quick, standard, thorough
     selected_indices: str = Form(None),  # JSON array of indices
-    selected_apis: str = Form(None)  # JSON array of API names to use
+    enabled_optional_apis: str = Form(None)  # JSON array of optional API names (mandatory APIs auto-selected)
 ):
     """
     Step 2: Validate/enrich references with API calls (streaming)
     
-    Modes:
+    Modes (control scope, not correctness):
     - quick: Only validate references missing DOI
     - standard: Validate references that need enrichment (default)
     - thorough: Validate all references
+    
+    API Selection:
+    - Mandatory APIs are automatically selected based on reference type and identifiers
+    - Users can only enable/disable optional augmentation APIs
+    - Core metadata completeness is guaranteed regardless of user input
     """
     try:
         if not validation_service:
@@ -1279,15 +1408,14 @@ async def validate_batch_streaming(
             except:
                 pass
         
-        # Parse selected APIs if provided
-        if selected_apis:
+        # Parse enabled optional APIs if provided (mandatory APIs are auto-selected)
+        optional_apis = None
+        if enabled_optional_apis:
             try:
-                selected_apis = json.loads(selected_apis)
-                logger.info(f"👤 User selected APIs: {selected_apis}")
+                optional_apis = json.loads(enabled_optional_apis)
+                logger.info(f"🔧 User enabled optional APIs: {optional_apis}")
             except:
-                selected_apis = None
-        else:
-            selected_apis = None
+                optional_apis = None
         
         # Update batch status
         job_manager.update_batch_validation_status(batch_id, "validating")
@@ -1300,7 +1428,7 @@ async def validate_batch_streaming(
                     batch.parsed_references,
                     mode=mode,
                     selected_indices=indices,
-                    selected_apis=selected_apis
+                    selected_apis=optional_apis  # Pass as selected_apis for backward compatibility (will be filtered to optional only)
                 ):
                     event_count += 1
                     event_type = event.get("type", "unknown")
@@ -1375,6 +1503,41 @@ async def validate_batch_streaming(
         logger.error(f"Validation error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# Authentication Endpoints
+@app.post("/token", response_model=Token)
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    user_dict = MOCK_USERS_DB.get(form_data.username)
+    if not user_dict or not verify_password(form_data.password, user_dict["hashed_password"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    access_token = create_access_token(data={"sub": user_dict["email"]})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/users/me", response_model=User)
+async def read_users_me(current_user: User = Depends(get_current_user)):
+    return current_user
+
+# Example Protected Route: GET /terrain
+@app.get("/terrain")
+async def get_terrain_data(current_user: User = Depends(get_current_user)):
+    """
+    Example of a protected route that requires authentication.
+    Only accessible with a valid JWT token.
+    """
+    return {
+        "message": "Authorized access to terrain data",
+        "user": current_user.email,
+        "terrain_data": {
+            "type": "mountainous",
+            "elevation_max": 4500,
+            "coordinates": [34.0522, -118.2437]
+        }
+    }
 
 # Cache endpoints removed as requested
 

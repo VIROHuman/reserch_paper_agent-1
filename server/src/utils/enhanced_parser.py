@@ -13,6 +13,9 @@ from .smart_api_strategy import SmartAPIStrategy
 from .doi_metadata_extractor import DOIMetadataExtractor, DOIMetadataConflictDetector
 from .flagging_system import ReferenceFlaggingSystem
 from .reference_tagging import generate_tagged_output as shared_generate_tagged_output
+from .reference_classifier import ReferenceTypeClassifier
+from ..models.reference_models import ReferenceType
+from .safe_string_utils import safe_strip, is_valid_doi, looks_like_article_number
 
 
 class EnhancedReferenceParser:
@@ -45,6 +48,9 @@ class EnhancedReferenceParser:
         
         # Initialize flagging system
         self.flagging_system = ReferenceFlaggingSystem()
+        
+        # Initialize reference type classifier (for mandatory API selection)
+        self.type_classifier = ReferenceTypeClassifier()
         
         logger.info("Enhanced reference parser initialized with NER as primary parser, Smart API Strategy, DOI extraction, and Flagging System")
     
@@ -259,13 +265,41 @@ class EnhancedReferenceParser:
             if not parsed_ref.get("url"):
                 parsed_ref["url"] = self._extract_url(ref_text)
             
-            # Try to extract DOI if missing
+            # Try to extract DOI if missing (with strict validation)
             if not parsed_ref.get("doi"):
-                parsed_ref["doi"] = self._extract_doi_enhanced(ref_text)
+                extracted_doi = self._extract_doi_enhanced(ref_text)
+                if extracted_doi:
+                    parsed_ref["doi"] = extracted_doi
+            
+            # Check if DOI field contains invalid DOI (article number)
+            # This handles cases where NER mislabeled article numbers as DOIs
+            if parsed_ref.get("doi"):
+                candidate_doi = parsed_ref.get("doi")
+                if not is_valid_doi(candidate_doi):
+                    # Invalid DOI - check if it's an article number
+                    if looks_like_article_number(candidate_doi):
+                        logger.info(f"Invalid DOI '{candidate_doi}' detected as article number, moving to article_number field")
+                        parsed_ref["article_number"] = candidate_doi
+                        parsed_ref["doi"] = None  # Remove invalid DOI
+                    else:
+                        logger.warning(f"Invalid DOI format rejected: '{candidate_doi}'")
+                        parsed_ref["doi"] = None  # Remove invalid DOI
             
             # Try to extract pages if missing
             if not parsed_ref.get("pages"):
                 parsed_ref["pages"] = self._extract_pages_enhanced(ref_text)
+            
+            # NORMALIZE ALL FIELDS BEFORE CLASSIFICATION (FIX #1)
+            # Use safe_strip to prevent NoneType errors
+            parsed_ref["title"] = safe_strip(parsed_ref.get("title"))
+            parsed_ref["journal"] = safe_strip(parsed_ref.get("journal"))
+            parsed_ref["publisher"] = safe_strip(parsed_ref.get("publisher"))
+            parsed_ref["doi"] = safe_strip(parsed_ref.get("doi"))
+            parsed_ref["pages"] = safe_strip(parsed_ref.get("pages"))
+            parsed_ref["url"] = safe_strip(parsed_ref.get("url"))
+            parsed_ref["volume"] = safe_strip(parsed_ref.get("volume"))
+            parsed_ref["issue"] = safe_strip(parsed_ref.get("issue"))
+            parsed_ref["article_number"] = safe_strip(parsed_ref.get("article_number"))
             
             return parsed_ref
             
@@ -851,7 +885,10 @@ class EnhancedReferenceParser:
         return None
     
     def _extract_doi_enhanced(self, text: str) -> Optional[str]:
-        """Enhanced DOI extraction with multiple patterns"""
+        """
+        Enhanced DOI extraction with STRICT VALIDATION.
+        Rejects invalid DOIs (e.g., article numbers mislabeled as DOIs).
+        """
         import re
         
         # Strategy 1: Standard DOI patterns
@@ -866,25 +903,36 @@ class EnhancedReferenceParser:
         for pattern in doi_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
-                doi = match.group(1).strip()
-                # Clean up the DOI
-                doi = re.sub(r'[.,\s]+$', '', doi)  # Remove trailing punctuation
-                if len(doi) > 10:  # DOI should be reasonably long
-                    return doi
+                candidate = safe_strip(match.group(1))
+                if not candidate:
+                    continue
+                
+                # Clean up the candidate
+                candidate = re.sub(r'[.,\s]+$', '', candidate)  # Remove trailing punctuation
+                
+                # STRICT VALIDATION: Check if it's a valid DOI
+                if is_valid_doi(candidate):
+                    return candidate
+                else:
+                    # Check if it looks like an article number instead
+                    if looks_like_article_number(candidate):
+                        logger.info(f"DOI candidate '{candidate}' rejected as invalid DOI, appears to be article number")
+                    else:
+                        logger.warning(f"DOI candidate '{candidate}' rejected as invalid DOI format")
         
         # Strategy 2: Look for DOI in parentheses
         parenthetical_doi = re.search(r'\(doi:\s*([^)]+)\)', text, re.IGNORECASE)
         if parenthetical_doi:
-            doi = parenthetical_doi.group(1).strip()
-            if len(doi) > 10:
-                return doi
+            candidate = safe_strip(parenthetical_doi.group(1))
+            if candidate and is_valid_doi(candidate):
+                return candidate
         
         # Strategy 3: Look for DOI at the end of the reference
         end_doi = re.search(r'doi:\s*([^\s,)]+)\s*$', text, re.IGNORECASE)
         if end_doi:
-            doi = end_doi.group(1).strip()
-            if len(doi) > 10:
-                return doi
+            candidate = safe_strip(end_doi.group(1))
+            if candidate and is_valid_doi(candidate):
+                return candidate
         
         return None
     
@@ -959,7 +1007,7 @@ class EnhancedReferenceParser:
         self, 
         ref_text: str, 
         enable_api_enrichment: bool = True,
-        selected_apis: List[str] = None
+        enabled_optional_apis: List[str] = None
     ) -> Dict[str, Any]:
         try:
             logger.info(f"🔧 parse_reference_enhanced called with enable_api_enrichment={enable_api_enrichment}")
@@ -977,6 +1025,11 @@ class EnhancedReferenceParser:
             doi_metadata = None
             conflict_analysis = None
             
+            # CLASSIFY AFTER NORMALIZATION (FIX #4)
+            # Classification must happen AFTER normalization to avoid NoneType errors
+            reference_type = self.type_classifier.classify(parsed_ref)
+            parsed_ref["publication_type"] = reference_type.value if hasattr(reference_type, 'value') else str(reference_type)
+            
             if enable_api_enrichment:
                 # Only extract DOI metadata during validation, not parsing
                 if parsed_ref.get('doi'):
@@ -987,14 +1040,15 @@ class EnhancedReferenceParser:
                     except Exception as e:
                         logger.error(f"DOI metadata extraction error: {str(e)}")
                 try:
-                    # Enhanced API enrichment with aggressive missing data search
+                    # Enhanced API enrichment with automatic mandatory API selection
                     enriched_ref = await self.smart_api.enrich_reference_smart(
                         parsed_ref, 
                         ref_text,
                         force_enrichment=True,
                         aggressive_search=True,  # New parameter for aggressive search
                         fill_missing_fields=True,  # New parameter to fill missing fields
-                        selected_apis=selected_apis  # User-selected APIs
+                        reference_type=reference_type,  # For mandatory API selection
+                        enabled_optional_apis=enabled_optional_apis  # User-enabled optional APIs
                     )
                     enriched_ref["parser_used"] = parser_used
                     enriched_ref["api_enrichment_used"] = True

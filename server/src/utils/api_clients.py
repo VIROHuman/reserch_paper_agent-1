@@ -3,10 +3,21 @@ import requests
 import asyncio
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
+from enum import Enum
 from loguru import logger
 
 from ..config import settings
 from ..models.schemas import CrossRefResponse, OpenAlexResponse, SemanticScholarResponse, ReferenceData, Author
+
+
+class APIProvider(Enum):
+    """API provider enumeration"""
+    CROSSREF = "crossref"
+    OPENALEX = "openalex"
+    SEMANTIC_SCHOLAR = "semantic_scholar"
+    DOAJ = "doaj"
+    PUBMED = "pubmed"
+    ARXIV = "arxiv"
 
 
 class CircuitBreaker:

@@ -259,11 +259,24 @@ class NERReferenceParser:
             result['year'] = int(year_match.group())
             result['confidence_scores']['year'] = 0.8
         
-        # Extract DOI
+        # Extract DOI with STRICT VALIDATION
+        from .safe_string_utils import is_valid_doi, looks_like_article_number
+        
         doi_match = re.search(r'10\.\d+/[^\s]+', raw_citation)
         if doi_match:
-            result['doi'] = doi_match.group()
-            result['confidence_scores']['doi'] = 0.9
+            candidate_doi = doi_match.group()
+            # STRICT VALIDATION: Check if it's a valid DOI
+            if is_valid_doi(candidate_doi):
+                result['doi'] = candidate_doi
+                result['confidence_scores']['doi'] = 0.9
+            elif looks_like_article_number(candidate_doi):
+                # Mislabeled as DOI but is actually article number
+                logger.info(f"NER detected '{candidate_doi}' as DOI but it's an article number, storing as article_number")
+                result['article_number'] = candidate_doi
+                result['doi'] = None
+            else:
+                logger.warning(f"NER detected invalid DOI format: '{candidate_doi}', rejecting")
+                result['doi'] = None
         
         # Extract URL
         url_match = re.search(r'https?://[^\s]+', raw_citation)
